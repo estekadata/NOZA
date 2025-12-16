@@ -5,11 +5,12 @@ description = "Mon application Streamlit"
 authors = ["Your Name <you@example.com>"]
 license = "MIT"
 readme = "README.md"
+package-mode = false # <--- La ligne package-mode doit être ici
 
 [tool.poetry.dependencies]
 python = "^3.10"
 streamlit = "^1.52.1"
 # ... autres dépendances ...
 
-[tool.poetry] # <--- Créez ou modifiez cette section
-package-mode = false # <--- AJOUTEZ CETTE LIGNE
+# [tool.poetry] # <--- Si vous avez ajouté une deuxième section comme celle-ci, SUPPRIMEZ-LA.
+# package-mode = false
