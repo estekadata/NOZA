@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "noza-481210",
+  "private_key_id": "2dce90c6dbfd812e750f1e47a9b925cac60b4bea",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDF/w2JbhpWDGG7\nPMkhtLvGLRyzhI8YGJcx7gG79NfKK+Q68ILpjVQ+OHuncBbviAS3xHy/+WVeX31a\nsyNR7K2Mqe8AbiA9/0AeeLduecCWY4gIGxVse0DFMo9e3sSlqE3Th+yWEyni1n7w\njbDpntGAqgtSMgOEoqP+BaACt+Suggf+oNKTPT7SIuvGKH/WIp4OPxtSIrBGsbvv\nMDu/L9nDR5B2DICe+jwEeA16Y+k1oiupXwlNIIQVatqChA7mFrKf2RkArY4E+1b5\nJfhBV1wNTf47yXj9yFEfPq1Z2Ecb78R+Zyc/PaNhpsWHEJzLK5MLpTrwvLCUILnU\nBctgxA63AgMBAAECggEAMAbrKK/tcXv1ZO6ctzFY7vxYXu9DqoukeTcLcqU0htTY\nurdGehKPIbyfugDFf3rV8iGWRRbg0OCGzq5vXdr0Sg+aatdLuN4mln2fuQuNfK1N\n/PFc5ACNuIfIITIWLzzBDBOHfuvNGDoBdqZYCIM+vGAC+QAqvEybTO3eX2pt7Sot\nlbdr7c90cx9EX1YPIG6/jjl6UHWPQE7S7qUKTu8I90tVC0UJNnPmFV2SvRFrNntn\nd/CkqrkEq8ddY2U/SOH1q754QolO2aqo3D/WXdd2VeI+uxzOnVb/NQCsOTm79ZP8\nztEqvEKyWuXE8wjj/F7pSplUwhwEZfoeaCBc+KS8mQKBgQD7VDNYZ08t2sx+RP/V\nymV/vTToxct9VheUmc09KVmTkeqSJA4uYzIhnvVxaKK0C6VhqZZqw8jmPJc6y1Xi\nsE2okBAwv1Rgs2LvAA7DNCgheSxWi4VNAlGl/7kL1WvMIgHkfDqJ5mCJzqs8cCJY\nM9W9TOZVoNkzszqWnV4KSmFjkwKBgQDJrRnKzIaQVj23fbzoOvTq9mAqj9Iv9nqS\nC4UFtBs7UUrCNjJ9RVAvwwebsEr0NBMTy/XUH6SR1j/eu6m9xODpgTudFU/Qh6GL\nZw0mDE0x5KgUG9iiyvMPey+eGt1plEzAao8D540ioYWs2+WzUNXItYIdYMC2OUif\nFDaXmrKmzQKBgQDAQX/pj1W1eRtXOEcQbvxHxB/2NGBeZ34wUZr7v2bjiQqMcoJa\nn80YhPWypF1aJ1KCq+0BjPVgklcJRcRUXZN6b4HDGIleU7tJopyoXHyaZowxRBdb\nenuk5ULTt5X3mMgj1ZgeJxoQMQUyfYD4QeauIWZNeHbOorsdvhHTA2UOewKBgQCZ\nVDPBzZGY9xhhAwW2gexnHv2qHkItGPXDR2LRHUd+56Uw1se4GhSG235TTcsOsvC2\nImE57vzNq9hPXNoGX0KoBQrvuJ4/6n5VX/nNLZkbD78B2tHvouD8qilfyQkBFjDs\nMZed3lOdOrRI4b5XgGOo/uZ3s3GQmSivWUzQIlslGQKBgFyMrsuyJq4k6wtRdGyj\nV69k7CnI2zbZtWkCDsHMYgCNDAnsFeZYnDTA6f8tMOLMq1lX7730YipYp6GESecQ\neR3Ek1X7taXGg8pYO6uRUKWQzhjtLgMpXWhTMSeYDUPNtc+U9L5u2p+ujuc3iidN\nyFgRL0E/nZluS1QCskW1qAfW\n-----END PRIVATE KEY-----\n",
+  "client_email": "noza-sheets-writer@noza-481210.iam.gserviceaccount.com",
+  "client_id": "115794965816738848695",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/noza-sheets-writer%40noza-481210.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
