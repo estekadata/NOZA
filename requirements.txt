@@ -1,5 +1,6 @@
 streamlit
 scikit-learn
 beautifulsoup4
-pandas
 numpy
+Pillow
+imagehash
