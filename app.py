@@ -1109,7 +1109,7 @@ def add_client_decision_columns(df: pd.DataFrame, decisions_map: Optional[dict] 
 # UI
 # ===================================================
 
-st.title("Scraper & Analyse texte + image - S-Factory (multi-catégories + Sheets + ALL_PRODUCTS)")
+st.title("Scrapping et analyse de produits e-commerce")
 
 if HAS_CLIP:
     st.caption("Analyse d'image : CLIP (embeddings visuels) + forme/couleur/global.")
