@@ -1159,7 +1159,7 @@ with st.sidebar:
     sa_json_path = ""
     if auth_mode == "Fichier JSON local":
         sa_json_path = st.text_input("Chemin JSON service account (local)", value="")
-        else:
+    else:
         st.caption("Utilise st.secrets['gcp_service_account'] (Streamlit Cloud ou .streamlit/secrets.toml en local).")
 
 
