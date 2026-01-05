@@ -6,6 +6,8 @@ import glob
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
+from collections import Counter
+
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -17,6 +19,17 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from PIL import Image, ImageFilter, ImageOps
 import imagehash  # garde pour le fallback pHash
+
+
+# minoré l'impact de la longueur du texte, Le prix peut etre un indicateur pour valider
+# que le produit est bien en erreur
+# Pas d'impact sur le nombre de caractere de la description
+# Augmenter le pourcentage de detecteur d'anomalie , trop de remontés en ano
+# pour le titre , prendre seulement les mots les plus courants des titres produits de la cat et non du descriptif de la catégorie
+# dans la description du produits, les mots clés les plus courants doivent se retrouver dans la description du produits
+# Augmenter le poids sur la fiche technique  ( les erreurs sont souvents ici )
+# ajouter une colonne anomalie juste fiche technique , ajouter une colonne ano description , si doute comparer les deux
+
 
 # ==== CLIP : import sécurisé (pour ne pas planter si torch n'est pas installé) ====
 try:
@@ -110,6 +123,7 @@ def sheets_client_from_streamlit_secrets():
     creds = Credentials.from_service_account_info(sa_info, scopes=SHEETS_SCOPES)
     return gspread.authorize(creds)
 
+
 def sheets_client_from_service_account_file(sa_json_path: str):
     """
     Mode local uniquement: JSON sur disque.
@@ -118,11 +132,11 @@ def sheets_client_from_service_account_file(sa_json_path: str):
     return gspread.authorize(creds)
 
 
-
 SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
 
 def extract_sheet_id(sheet_url_or_id: str) -> str:
     s = (sheet_url_or_id or "").strip()
@@ -131,6 +145,7 @@ def extract_sheet_id(sheet_url_or_id: str) -> str:
     if "docs.google.com" in s and "/spreadsheets/d/" in s:
         return s.split("/spreadsheets/d/")[1].split("/")[0]
     return s
+
 
 def guess_service_account_json(default_dir: str = ".") -> str:
     candidates = glob.glob(os.path.join(default_dir, "*.json"))
@@ -144,9 +159,11 @@ def guess_service_account_json(default_dir: str = ".") -> str:
             continue
     return ""
 
+
 def sheets_client_from_service_account(sa_json_path: str):
     creds = Credentials.from_service_account_file(sa_json_path, scopes=SHEETS_SCOPES)
     return gspread.authorize(creds)
+
 
 def sanitize_sheet_title(title: str, max_len: int = 90) -> str:
     t = re.sub(r"[\[\]\:\*\?\/\\]", " ", title).strip()
@@ -155,11 +172,13 @@ def sanitize_sheet_title(title: str, max_len: int = 90) -> str:
         t = "Categorie"
     return t[:max_len]
 
+
 def ensure_worksheet(sh, title: str, rows: int = 2000, cols: int = 50):
     try:
         return sh.worksheet(title)
     except Exception:
         return sh.add_worksheet(title=title, rows=rows, cols=cols)
+
 
 def write_df_to_sheet(sh, title: str, df: pd.DataFrame):
     ws = ensure_worksheet(sh, title, rows=max(2000, len(df) + 50), cols=max(50, len(df.columns) + 10))
@@ -169,6 +188,7 @@ def write_df_to_sheet(sh, title: str, df: pd.DataFrame):
         return
     payload = [df.columns.astype(str).tolist()] + df.astype(str).fillna("").values.tolist()
     ws.update(payload, value_input_option="USER_ENTERED")
+
 
 def read_sheet_as_df(sh, title: str) -> pd.DataFrame:
     try:
@@ -184,6 +204,7 @@ def read_sheet_as_df(sh, title: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
 
+
 def ensure_exclusions_sheet(sh):
     title = "EXCLUSIONS"
     ws = ensure_worksheet(sh, title, rows=2000, cols=10)
@@ -191,6 +212,7 @@ def ensure_exclusions_sheet(sh):
     if not values:
         ws.update("A1:E1", [["category_url", "product_url", "nom", "decision_client", "date"]])
     return ws
+
 
 def load_excluded_urls(sh, category_url: str) -> set:
     df_excl = read_sheet_as_df(sh, "EXCLUSIONS")
@@ -201,6 +223,7 @@ def load_excluded_urls(sh, category_url: str) -> set:
     df_excl = df_excl[df_excl["category_url"].astype(str) == str(category_url)]
     urls = df_excl["product_url"].astype(str).tolist()
     return set(u for u in urls if u and u != "nan")
+
 
 def update_exclusions_from_df(sh, category_url: str, df: pd.DataFrame):
     if df.empty or "decision_client" not in df.columns:
@@ -229,6 +252,7 @@ def update_exclusions_from_df(sh, category_url: str, df: pd.DataFrame):
     rows = excl.astype(str).values.tolist()
     ws.append_rows(rows, value_input_option="USER_ENTERED")
 
+
 def load_decisions_map_from_all_products(sh) -> dict:
     """
     Relit l’onglet ALL_PRODUCTS (si présent) et construit un mapping:
@@ -247,6 +271,7 @@ def load_decisions_map_from_all_products(sh) -> dict:
         if u:
             m[u] = d.strip()
     return m
+
 
 def delete_all_tabs_except(sh, keep_titles: set):
     """
@@ -276,6 +301,7 @@ def absolutize_url(href: str) -> str:
     if href.startswith("http://") or href.startswith("https://"):
         return href
     return BASE_DOMAIN.rstrip("/") + "/" + href.lstrip("/")
+
 
 def get_soup(url: str) -> BeautifulSoup:
     resp = requests.get(url, headers=HEADERS, timeout=20)
@@ -322,11 +348,13 @@ def get_category_slug(category_url: str) -> str:
         return segments[-2]
     return last
 
+
 def extract_category_title(soup: BeautifulSoup) -> str:
     h1 = soup.find("h1")
     if h1:
         return h1.get_text(" ", strip=True)
     return ""
+
 
 def extract_category_intro_text(soup: BeautifulSoup, max_chars: int = 4000) -> str:
     selectors = [
@@ -364,6 +392,7 @@ def extract_category_intro_text(soup: BeautifulSoup, max_chars: int = 4000) -> s
 
     return " ".join(parts)[:max_chars]
 
+
 def build_category_main_term(category_title: str, category_url: str) -> str:
     raw = (category_title or "").lower().strip()
     slug = get_category_slug(category_url).replace("-", " ").lower().strip()
@@ -379,6 +408,7 @@ def build_category_main_term(category_title: str, category_url: str) -> str:
             return preferred
 
     return tokens[0] if tokens else "produit"
+
 
 def get_product_urls(category_url: str, max_pages: int = 80) -> list:
     slug = get_category_slug(category_url)
@@ -428,6 +458,7 @@ def extract_caracteristiques(soup: BeautifulSoup) -> list:
         return []
     return [li.get_text(strip=True) for li in ul.find_all("li")]
 
+
 def extract_description(soup: BeautifulSoup) -> str:
     h_desc = None
     for tag in soup.find_all(["h2", "h3"]):
@@ -447,6 +478,7 @@ def extract_description(soup: BeautifulSoup) -> str:
                 parts.append(txt)
     return " ".join(parts)
 
+
 def extract_price(soup: BeautifulSoup) -> str:
     special = soup.find("p", class_="special-price")
     if special:
@@ -457,6 +489,7 @@ def extract_price(soup: BeautifulSoup) -> str:
     if span:
         return span.get_text(strip=True)
     return ""
+
 
 def extract_image_url(soup: BeautifulSoup) -> str:
     img = soup.find("img", attrs={"data-src": True})
@@ -483,6 +516,7 @@ def extract_image_url(soup: BeautifulSoup) -> str:
 
     return ""
 
+
 def extract_tech_specs(soup: BeautifulSoup) -> dict:
     h_info = None
     for tag in soup.find_all(["h2", "h3"]):
@@ -504,6 +538,7 @@ def extract_tech_specs(soup: BeautifulSoup) -> dict:
             if key:
                 specs[key] = val
     return specs
+
 
 def scrape_product(url: str) -> dict:
     soup = get_soup(url)
@@ -564,6 +599,7 @@ def price_to_float(price_str):
     except ValueError:
         return np.nan
 
+
 def extract_materiaux(carac: str) -> str:
     if not isinstance(carac, str):
         return ""
@@ -571,6 +607,7 @@ def extract_materiaux(carac: str) -> str:
         if "Matériaux" in part or "Matériau" in part:
             return part.split(":", 1)[-1].strip()
     return ""
+
 
 def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.DataFrame:
     if df.empty:
@@ -616,6 +653,34 @@ def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.
         df["taux_fiche_completude"] = np.nan
 
     return df
+
+
+# ===================================================
+# MOTS-CLES (titres produits) + couverture description
+# ===================================================
+
+def tokenize_fr(text: str) -> list:
+    text = (text or "").lower()
+    text = re.sub(r"[^a-zàâçéèêëîïôûùüÿñæœ0-9\s-]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    toks = [t for t in text.split(" ") if t and t not in STOPWORDS_FR and len(t) > 3]
+    return toks
+
+
+def compute_common_title_terms(df: pd.DataFrame, top_k: int = 12) -> list:
+    titles = df.get("nom", pd.Series([], dtype=str)).fillna("").astype(str).tolist()
+    counter = Counter()
+    for t in titles:
+        counter.update(tokenize_fr(t))
+    return [w for (w, _) in counter.most_common(top_k)]
+
+
+def description_keyword_coverage(desc: str, keywords: list) -> float:
+    if not keywords:
+        return 1.0
+    toks = set(tokenize_fr(desc))
+    hit = sum(1 for k in keywords if k in toks)
+    return hit / max(1, len(keywords))
 
 
 # ===================================================
@@ -687,6 +752,7 @@ def _l2_normalize(vec: np.ndarray) -> np.ndarray:
         return vec
     return vec / n
 
+
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     if a is None or b is None:
         return np.nan
@@ -698,6 +764,7 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
         return np.nan
     return float(np.dot(a, b) / (na * nb))
 
+
 def download_pil_image(url: str):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
@@ -705,6 +772,7 @@ def download_pil_image(url: str):
         return Image.open(io.BytesIO(resp.content)).convert("RGB")
     except Exception:
         return None
+
 
 def crop_to_object(img: Image.Image, white_thresh: int = 245, margin: float = 0.10) -> Image.Image:
     arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
@@ -728,10 +796,12 @@ def crop_to_object(img: Image.Image, white_thresh: int = 245, margin: float = 0.
 
     return img.crop((x0, y0, x1 + 1, y1 + 1))
 
+
 def prepare_image_for_analysis(img: Image.Image) -> Image.Image:
     img2 = crop_to_object(img, white_thresh=245, margin=0.10)
     img2 = img2.resize((256, 256))
     return img2
+
 
 def color_signature(img: Image.Image, bins_h=24, bins_s=8, bins_v=8) -> np.ndarray:
     img = prepare_image_for_analysis(img)
@@ -750,6 +820,7 @@ def color_signature(img: Image.Image, bins_h=24, bins_s=8, bins_v=8) -> np.ndarr
     np.add.at(hist, (h_bin, s_bin, v_bin), 1.0)
     return _l2_normalize(hist.ravel())
 
+
 def shape_signature(img: Image.Image, size=128) -> np.ndarray:
     img = prepare_image_for_analysis(img)
 
@@ -762,11 +833,13 @@ def shape_signature(img: Image.Image, size=128) -> np.ndarray:
     hist, _ = np.histogram(arr.ravel(), bins=32, range=(0, 255))
     return _l2_normalize(hist.astype(np.float32))
 
+
 def phash_similarity(h1, h2) -> float:
     if h1 is None or h2 is None:
         return np.nan
     dist = h1 - h2
     return float(1 - (dist / 64))
+
 
 def get_clip_embedding(url: str):
     if not HAS_CLIP:
@@ -783,6 +856,7 @@ def get_clip_embedding(url: str):
         return emb.cpu().numpy()[0]
     except Exception:
         return None
+
 
 def compute_image_similarity_phash(df: pd.DataFrame) -> pd.DataFrame:
     hashes = []
@@ -843,11 +917,14 @@ def compute_image_similarity_phash(df: pd.DataFrame) -> pd.DataFrame:
 
             parts, weights = [], []
             if not np.isnan(s_ph):
-                parts.append(s_ph); weights.append(0.45)
+                parts.append(s_ph)
+                weights.append(0.45)
             if not np.isnan(s_sh):
-                parts.append(s_sh); weights.append(0.30)
+                parts.append(s_sh)
+                weights.append(0.30)
             if not np.isnan(s_col):
-                parts.append(s_col); weights.append(0.25)
+                parts.append(s_col)
+                weights.append(0.25)
 
             if parts and sum(weights) > 0:
                 sims_global.append(float(np.average(parts, weights=weights)))
@@ -863,6 +940,7 @@ def compute_image_similarity_phash(df: pd.DataFrame) -> pd.DataFrame:
     df["similarite_image_globale_moyenne"] = sim_global_mean
 
     return df
+
 
 def compute_image_similarity_clip(df: pd.DataFrame) -> pd.DataFrame:
     embeddings = []
@@ -920,11 +998,14 @@ def compute_image_similarity_clip(df: pd.DataFrame) -> pd.DataFrame:
 
             parts, weights = [], []
             if not np.isnan(s_clip):
-                parts.append(s_clip); weights.append(0.55)
+                parts.append(s_clip)
+                weights.append(0.55)
             if not np.isnan(s_sh):
-                parts.append(s_sh); weights.append(0.25)
+                parts.append(s_sh)
+                weights.append(0.25)
             if not np.isnan(s_col):
-                parts.append(s_col); weights.append(0.20)
+                parts.append(s_col)
+                weights.append(0.20)
 
             if parts and sum(weights) > 0:
                 sims_global.append(float(np.average(parts, weights=weights)))
@@ -940,6 +1021,7 @@ def compute_image_similarity_clip(df: pd.DataFrame) -> pd.DataFrame:
     df["similarite_image_globale_moyenne"] = sim_global_mean
 
     return df
+
 
 def compute_image_similarity(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -967,11 +1049,15 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         df["suspect"] = False
         df["raison_suspecte"] = ""
         df["reco_action"] = ""
+        df["score_fiche_technique"] = 0
+        df["ano_fiche_technique"] = False
+        df["score_description"] = 0
+        df["ano_description"] = False
         return df
 
-    threshold_sim = float(np.nanquantile(df["similarite_moyenne"], 0.2)) if "similarite_moyenne" in df.columns else None
-    threshold_img = float(np.nanquantile(df["similarite_image_moyenne"], 0.1)) if "similarite_image_moyenne" in df.columns and df["similarite_image_moyenne"].notna().any() else None
-    threshold_cat = float(np.nanquantile(df["similarite_categorie"], 0.2)) if "similarite_categorie" in df.columns and df["similarite_categorie"].notna().any() else None
+    threshold_sim = float(np.nanquantile(df["similarite_moyenne"], 0.10)) if "similarite_moyenne" in df.columns else None
+    threshold_img = float(np.nanquantile(df["similarite_image_moyenne"], 0.05)) if "similarite_image_moyenne" in df.columns and df["similarite_image_moyenne"].notna().any() else None
+    threshold_cat = float(np.nanquantile(df["similarite_categorie"], 0.10)) if "similarite_categorie" in df.columns and df["similarite_categorie"].notna().any() else None
 
     if "prix_num" in df.columns and df["prix_num"].notna().any():
         q1 = float(df["prix_num"].quantile(0.25))
@@ -982,12 +1068,17 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
     majority_portable = (df["is_portable"].mean() > 0.5 if "is_portable" in df.columns else False)
 
     scores, niveaux, suspects_flags, reasons, actions = [], [], [], [], []
+    score_ft_list, ano_ft_list = [], []
+    score_desc_list, ano_desc_list = [], []
+
     term = (category_main_term or "produit").strip()
 
     for _, row in df.iterrows():
         row_reasons = []
         row_actions = []
         score = 0
+        score_ft = 0
+        score_desc = 0
 
         if threshold_sim is not None:
             sim = row.get("similarite_moyenne", 1.0)
@@ -1034,38 +1125,34 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             row_reasons.append("mentionne 'de salon' alors que la majorité des produits semble portable")
             row_actions.append("Vérifier si ce modèle ne devrait pas être dans une autre catégorie (produits de salon)")
 
-        prix = row.get("prix_num")
-        if q1 is not None and isinstance(prix, (int, float)) and not np.isnan(prix):
-            if prix < q1:
-                score += 15
-                row_reasons.append("prix beaucoup plus bas que la majorité de la catégorie")
-                row_actions.append("Vérifier une éventuelle erreur de saisie ou un problème de positionnement prix")
-            elif prix > q3:
-                score += 15
-                row_reasons.append("prix beaucoup plus élevé que la majorité de la catégorie")
-                row_actions.append("Vérifier la cohérence du positionnement prix / gamme")
-
+        # ---- fiche technique (poids augmenté) ----
         taux = row.get("taux_fiche_completude", np.nan)
         if isinstance(taux, (int, float)) and not np.isnan(taux):
             if taux < 0.3:
-                score += 10
+                score_ft += 25
                 row_reasons.append("fiche technique très incomplète")
                 row_actions.append("Compléter les champs clés de la fiche technique (dimensions, type, matériaux, etc.)")
             elif taux < 0.6:
-                score += 5
+                score_ft += 12
                 row_reasons.append("fiche technique partiellement complète")
                 row_actions.append("Enrichir la fiche technique avec quelques informations supplémentaires")
 
-        desc_len = row.get("description_len", 0)
-        if isinstance(desc_len, (int, float)):
-            if desc_len < 80:
+        # ---- description: couverture des mots-clés titres catégorie ----
+        cov = row.get("desc_kw_coverage", np.nan)
+        if isinstance(cov, (int, float)) and not np.isnan(cov) and cov < 0.20:
+            score_desc += 15
+            row_reasons.append("description peu alignée avec les mots courants des titres de la catégorie")
+            row_actions.append("Enrichir la description avec les termes attendus (issus des titres produits)")
+
+        score += score_ft + score_desc
+
+        # ---- prix comme indicateur de confirmation (pas déclencheur principal) ----
+        prix = row.get("prix_num")
+        if score >= 30 and q1 is not None and isinstance(prix, (int, float)) and not np.isnan(prix):
+            if prix < q1 or prix > q3:
                 score += 10
-                row_reasons.append("description très courte")
-                row_actions.append("Enrichir la description (usage, avantages, public visé)")
-            elif desc_len < 150:
-                score += 5
-                row_reasons.append("description un peu courte")
-                row_actions.append("Améliorer légèrement la description pour mieux vendre le produit")
+                row_reasons.append("prix atypique (renforce le doute)")
+                row_actions.append("Vérifier cohérence prix vs catégorie")
 
         score = min(score, 100)
 
@@ -1078,7 +1165,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         else:
             niveau = "forte"
 
-        suspect = score >= 50
+        suspect = score >= 65
 
         reasons_text = " ; ".join(dict.fromkeys(r for r in row_reasons if r)) or ("Aucune anomalie détectée en priorité" if niveau == "OK" else "")
         action_text = " | ".join(dict.fromkeys(a for a in row_actions if a)) or "OK – aucun changement prioritaire recommandé"
@@ -1089,11 +1176,22 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         reasons.append(reasons_text)
         actions.append(action_text)
 
+        score_ft_list.append(int(score_ft))
+        ano_ft_list.append(bool(score_ft >= 20))
+        score_desc_list.append(int(score_desc))
+        ano_desc_list.append(bool(score_desc >= 15))
+
     df["anomalie_score"] = scores
     df["niveau_anomalie"] = niveaux
     df["suspect"] = suspects_flags
     df["raison_suspecte"] = reasons
     df["reco_action"] = actions
+
+    df["score_fiche_technique"] = score_ft_list
+    df["ano_fiche_technique"] = ano_ft_list
+    df["score_description"] = score_desc_list
+    df["ano_description"] = ano_desc_list
+
     return df
 
 
@@ -1153,15 +1251,15 @@ with st.sidebar:
     sheet_url_or_id = st.text_input("URL ou ID du tableur", value=sheet_url_default)
 
     auth_mode = st.selectbox(
-    "Mode d'auth Google",
-    ["Streamlit secrets (recommandé)", "Fichier JSON local"],
-    index=0)
+        "Mode d'auth Google",
+        ["Streamlit secrets (recommandé)", "Fichier JSON local"],
+        index=0
+    )
     sa_json_path = ""
     if auth_mode == "Fichier JSON local":
         sa_json_path = st.text_input("Chemin JSON service account (local)", value="")
     else:
         st.caption("Utilise st.secrets['gcp_service_account'] (Streamlit Cloud ou .streamlit/secrets.toml en local).")
-
 
     wipe_tabs = st.checkbox(
         "Supprimer tous les onglets avant de réécrire (conserve EXCLUSIONS)",
@@ -1264,6 +1362,14 @@ if run:
                         results.append(product)
 
                     df = pd.DataFrame(results)
+
+                    # mots-clés basés sur les TITRES produits de la catégorie
+                    common_title_terms = compute_common_title_terms(df, top_k=12)
+                    df["category_title_keywords"] = ", ".join(common_title_terms)
+                    df["desc_kw_coverage"] = df["description"].fillna("").astype(str).apply(
+                        lambda d: description_keyword_coverage(d, common_title_terms)
+                    )
+
                     df = enrich_structured_features(df, category_main_term)
                     df = compute_similarity(df, category_intro)
 
@@ -1376,8 +1482,11 @@ if run:
                             "category_url", "category_title", "mot_cle_principal",
                             "nom", "marque", "prix", "prix_num",
                             "anomalie_score", "niveau_anomalie", "suspect",
+                            "score_fiche_technique", "ano_fiche_technique",
+                            "score_description", "ano_description",
                             "raison_suspecte", "reco_action",
                             "decision_client", "exclure_prochaine_analyse",
+                            "category_title_keywords", "desc_kw_coverage",
                             "url", "image_url",
                             "similarite_moyenne", "similarite_categorie",
                             "similarite_image_moyenne", "similarite_forme_moyenne",
@@ -1454,6 +1563,9 @@ if st.session_state.results_by_category:
                     "similarite_moyenne", "similarite_categorie",
                     "similarite_image_moyenne", "similarite_forme_moyenne",
                     "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
+                    "category_title_keywords", "desc_kw_coverage",
+                    "score_fiche_technique", "ano_fiche_technique",
+                    "score_description", "ano_description",
                     "anomalie_score", "niveau_anomalie", "suspect",
                     "raison_suspecte", "reco_action",
                     "decision_client", "exclure_prochaine_analyse",
