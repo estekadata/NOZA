@@ -15,3 +15,5 @@ streamlit = "^1.52.1"
 # [tool.poetry] # <--- Si vous avez ajouté une deuxième section comme celle-ci, SUPPRIMEZ-LA.
 # package-mode = false
 beautifulsoup4 = "^4.14.3"
+gspread = "^6.2.1"
+google-auth = "^2.45.0"
