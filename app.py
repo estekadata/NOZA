@@ -3,6 +3,7 @@ import os
 import re
 import json
 import glob
+import time  # ✅ AJOUT (heartbeat)
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
@@ -1278,6 +1279,10 @@ with st.sidebar:
 
 run = st.button("Lancer le scraping & l'analyse (toutes catégories)")
 
+# ✅ AJOUT: zones d'affichage "le code vit"
+heartbeat = st.empty()
+prod_status = st.empty()
+prod_prog = st.empty()
 
 if run:
     category_urls = [u.strip() for u in urls_text.splitlines() if u.strip()]
@@ -1320,8 +1325,16 @@ if run:
         prog = st.progress(0)
         status = st.empty()
 
+        last_heartbeat = 0.0  # ✅ AJOUT
+
         for idx_cat, category_url in enumerate(category_urls, start=1):
             status.write(f"Catégorie {idx_cat}/{len(category_urls)} : {category_url}")
+
+            # ✅ AJOUT heartbeat (catégorie)
+            now = time.time()
+            if now - last_heartbeat > 1.0:
+                heartbeat.info(f"🔄 En cours… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
+                last_heartbeat = now
 
             try:
                 with st.spinner("Lecture catégorie (titre + intro)..."):
@@ -1332,6 +1345,10 @@ if run:
 
                 with st.spinner("Récupération URLs produits (pagination incluse)..."):
                     product_urls = get_product_urls(category_url, max_pages=int(max_pages))
+
+                # ✅ AJOUT: reset barre produit
+                prod_status.write("")
+                prod_prog.progress(0)
 
                 # exclusions persistantes
                 if sh is not None:
@@ -1346,7 +1363,19 @@ if run:
                     df = pd.DataFrame()
                 else:
                     results = []
-                    for prod_url in product_urls:
+                    total_prod = len(product_urls)
+
+                    for i, prod_url in enumerate(product_urls):
+                        # ✅ AJOUT heartbeat + progression produit
+                        if i == 0 or (time.time() - last_heartbeat) > 1.0:
+                            heartbeat.info(
+                                f"🧱 Scraping produits… {i+1}/{total_prod} – catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}"
+                            )
+                            last_heartbeat = time.time()
+
+                        prod_status.write(f"Produit {i+1}/{total_prod} : {prod_url}")
+                        prod_prog.progress((i + 1) / max(1, total_prod))
+
                         try:
                             product = scrape_product(prod_url)
                         except Exception as e:
@@ -1374,6 +1403,8 @@ if run:
                     df = compute_similarity(df, category_intro)
 
                     if analyse_image:
+                        # ✅ AJOUT heartbeat (images)
+                        heartbeat.info(f"🖼️ Analyse images… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
                         with st.spinner("Analyse images..."):
                             df = compute_image_similarity(df)
 
@@ -1404,6 +1435,7 @@ if run:
                 prog.progress(idx_cat / len(category_urls))
 
         status.success("Traitement terminé.")
+        heartbeat.success(f"✅ Terminé – {datetime.now().strftime('%H:%M:%S')}")
 
         # ===================================================
         # EXPORT SHEETS
@@ -1414,6 +1446,9 @@ if run:
                 st.warning("Vérifie que le tableur est partagé avec l’email du service account.")
             else:
                 try:
+                    # ✅ AJOUT heartbeat (export)
+                    heartbeat.info(f"📤 Export Google Sheets… {datetime.now().strftime('%H:%M:%S')}")
+
                     summary_rows = []
                     all_suspects_rows = []
                     all_products_rows = []
@@ -1500,6 +1535,7 @@ if run:
                         write_df_to_sheet(sh, "ALL_PRODUCTS", pd.DataFrame({"info": ["Aucun produit"]}))
 
                     st.success("Export terminé (onglet par catégorie + SUMMARY + SUSPECTS + ALL_PRODUCTS + EXCLUSIONS).")
+                    heartbeat.success(f"✅ Export terminé – {datetime.now().strftime('%H:%M:%S')}")
 
                 except Exception as e:
                     st.error(f"Export Sheets impossible : {e}")
