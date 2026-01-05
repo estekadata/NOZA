@@ -99,6 +99,25 @@ def init_clip():
 # ===================================================
 # SHEETS HELPERS
 # ===================================================
+def sheets_client_from_streamlit_secrets():
+    """
+    Streamlit Cloud / local secrets.toml:
+    st.secrets["gcp_service_account"] doit contenir le dict du service account.
+    """
+    sa_info = st.secrets.get("gcp_service_account", None)
+    if not sa_info:
+        raise RuntimeError("Secret manquant: st.secrets['gcp_service_account']")
+    creds = Credentials.from_service_account_info(sa_info, scopes=SHEETS_SCOPES)
+    return gspread.authorize(creds)
+
+def sheets_client_from_service_account_file(sa_json_path: str):
+    """
+    Mode local uniquement: JSON sur disque.
+    """
+    creds = Credentials.from_service_account_file(sa_json_path, scopes=SHEETS_SCOPES)
+    return gspread.authorize(creds)
+
+
 
 SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -1133,8 +1152,16 @@ with st.sidebar:
     sheet_url_default = "https://docs.google.com/spreadsheets/d/1lSqjJb-6HZQVfsDVrjeN2wULtFW7luK4d-HmBQOlx58/edit?gid=0#gid=0"
     sheet_url_or_id = st.text_input("URL ou ID du tableur", value=sheet_url_default)
 
-    default_sa = guess_service_account_json(".")
-    sa_json_path = st.text_input("Chemin JSON service account", value=default_sa)
+    auth_mode = st.selectbox(
+    "Mode d'auth Google",
+    ["Streamlit secrets (recommandé)", "Fichier JSON local"],
+    index=0)
+    sa_json_path = ""
+    if auth_mode == "Fichier JSON local":
+        sa_json_path = st.text_input("Chemin JSON service account (local)", value="")
+        else:
+        st.caption("Utilise st.secrets['gcp_service_account'] (Streamlit Cloud ou .streamlit/secrets.toml en local).")
+
 
     wipe_tabs = st.checkbox(
         "Supprimer tous les onglets avant de réécrire (conserve EXCLUSIONS)",
@@ -1171,21 +1198,22 @@ if run:
                 sheets_error = "Packages manquants: installe gspread + google-auth"
             elif not spreadsheet_id:
                 sheets_error = "ID du tableur introuvable (URL/ID invalide)."
-            elif not sa_json_path or not os.path.exists(sa_json_path):
-                sheets_error = "JSON service account introuvable (chemin invalide)."
             else:
                 try:
-                    client = sheets_client_from_service_account(sa_json_path)
+                    if auth_mode == "Streamlit secrets (recommandé)":
+                        client = sheets_client_from_streamlit_secrets()
+                    else:
+                        if not sa_json_path or not os.path.exists(sa_json_path):
+                            raise FileNotFoundError("JSON service account introuvable (chemin invalide).")
+                        client = sheets_client_from_service_account_file(sa_json_path)
+
                     sh = client.open_by_key(spreadsheet_id)
 
-                    # on s'assure que EXCLUSIONS existe (obligatoire si wipe_tabs)
                     ensure_exclusions_sheet(sh)
 
-                    # option suppression des onglets (on garde EXCLUSIONS)
                     if wipe_tabs:
                         delete_all_tabs_except(sh, keep_titles={"EXCLUSIONS"})
 
-                    # on relit ALL_PRODUCTS (si présent) pour ne pas écraser les choix du client
                     decisions_map = load_decisions_map_from_all_products(sh)
 
                 except Exception as e:
