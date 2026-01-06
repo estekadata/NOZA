@@ -641,15 +641,28 @@ def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.
 
     df["description_len"] = df["description"].fillna("").str.len()
 
+    # ✅ NOUVEAUTÉ: complétude fiche technique basée sur les champs "attendus" (communs),
+    # au lieu de pénaliser un produit parce qu’il n’a pas les champs d’un autre type de produit.
     fiche_cols = [c for c in df.columns if c.startswith("fiche_")]
-    df["nb_fiche_champs"] = len(fiche_cols)
+
     if fiche_cols:
-        df["nb_fiche_non_vides"] = df[fiche_cols].apply(
-            lambda row: sum(bool(str(v).strip()) for v in row),
-            axis=1
-        )
-        df["taux_fiche_completude"] = df["nb_fiche_non_vides"] / df["nb_fiche_champs"]
+        presence = df[fiche_cols].notna() & df[fiche_cols].astype(str).apply(lambda s: s.str.strip().ne(""))
+        expected_cols = presence.mean(axis=0)
+        expected_cols = expected_cols[expected_cols >= 0.6].index.tolist()  # seuil "champs attendus"
+
+        df["nb_fiche_champs"] = len(expected_cols)
+
+        if expected_cols:
+            df["nb_fiche_non_vides"] = df[expected_cols].apply(
+                lambda row: sum(bool(str(v).strip()) for v in row),
+                axis=1
+            )
+            df["taux_fiche_completude"] = df["nb_fiche_non_vides"] / df["nb_fiche_champs"]
+        else:
+            df["nb_fiche_non_vides"] = 0
+            df["taux_fiche_completude"] = np.nan
     else:
+        df["nb_fiche_champs"] = 0
         df["nb_fiche_non_vides"] = 0
         df["taux_fiche_completude"] = np.nan
 
