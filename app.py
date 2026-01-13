@@ -641,30 +641,134 @@ def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.
 
     df["description_len"] = df["description"].fillna("").str.len()
 
-    # ✅ NOUVEAUTÉ: complétude fiche technique basée sur les champs "attendus" (communs),
-    # au lieu de pénaliser un produit parce qu’il n’a pas les champs d’un autre type de produit.
+    # (on garde ces colonnes, mais elles ne pilotent plus l'anomalie fiche technique)
     fiche_cols = [c for c in df.columns if c.startswith("fiche_")]
-
+    df["nb_fiche_champs"] = len(fiche_cols)
     if fiche_cols:
-        presence = df[fiche_cols].notna() & df[fiche_cols].astype(str).apply(lambda s: s.str.strip().ne(""))
-        expected_cols = presence.mean(axis=0)
-        expected_cols = expected_cols[expected_cols >= 0.6].index.tolist()  # seuil "champs attendus"
-
-        df["nb_fiche_champs"] = len(expected_cols)
-
-        if expected_cols:
-            df["nb_fiche_non_vides"] = df[expected_cols].apply(
-                lambda row: sum(bool(str(v).strip()) for v in row),
-                axis=1
-            )
-            df["taux_fiche_completude"] = df["nb_fiche_non_vides"] / df["nb_fiche_champs"]
-        else:
-            df["nb_fiche_non_vides"] = 0
-            df["taux_fiche_completude"] = np.nan
+        df["nb_fiche_non_vides"] = df[fiche_cols].apply(
+            lambda row: sum(bool(str(v).strip()) for v in row),
+            axis=1
+        )
+        df["taux_fiche_completude"] = df["nb_fiche_non_vides"] / df["nb_fiche_champs"]
     else:
-        df["nb_fiche_champs"] = 0
         df["nb_fiche_non_vides"] = 0
         df["taux_fiche_completude"] = np.nan
+
+    return df
+
+
+# ===================================================
+# ✅ NOUVEAU: COHÉRENCE FICHE TECHNIQUE (comparaison valeurs)
+# ===================================================
+
+def _norm_txt(v) -> str:
+    if v is None:
+        return ""
+    s = str(v).strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    s = s.replace("’", "'")
+    return s
+
+
+def _parse_dimensions_to_mm(val: str):
+    s = _norm_txt(val)
+    if not s:
+        return None
+    s = s.replace("×", "x").replace("*", "x")
+    unit = "mm"
+    if "cm" in s:
+        unit = "cm"
+    nums = re.findall(r"(\d+(?:[.,]\d+)?)", s)
+    if len(nums) < 2:
+        return None
+    a = float(nums[0].replace(",", "."))
+    b = float(nums[1].replace(",", "."))
+    if unit == "cm":
+        a *= 10
+        b *= 10
+    return (a, b)
+
+
+def _tech_field_consensus(series: pd.Series, min_ratio: float = 0.6):
+    vals = [_norm_txt(x) for x in series.tolist()]
+    vals = [v for v in vals if v and v != "nan"]
+    if not vals:
+        return ("", 0.0)
+    c = Counter(vals)
+    top_val, top_cnt = c.most_common(1)[0]
+    ratio = top_cnt / max(1, len(vals))
+    if ratio >= min_ratio:
+        return (top_val, ratio)
+    return ("", ratio)
+
+
+def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float = 0.6) -> pd.DataFrame:
+    if df.empty:
+        df["score_fiche_technique"] = 0
+        df["ano_fiche_technique"] = False
+        df["fiche_tech_issues"] = ""
+        df["nb_fiche_champs_consideres"] = 0
+        return df
+
+    fiche_cols = [c for c in df.columns if c.startswith("fiche_")]
+    if not fiche_cols:
+        df["score_fiche_technique"] = 0
+        df["ano_fiche_technique"] = False
+        df["fiche_tech_issues"] = ""
+        df["nb_fiche_champs_consideres"] = 0
+        return df
+
+    stable_cols = []
+    consensus = {}
+    for col in fiche_cols:
+        top_val, ratio = _tech_field_consensus(df[col], min_ratio=consensus_ratio)
+        if top_val:
+            stable_cols.append(col)
+            consensus[col] = (top_val, ratio)
+
+    dim_cols = [c for c in fiche_cols if "dimension" in c]
+
+    issues_list = []
+    scores = []
+
+    for _, row in df.iterrows():
+        issues = []
+        penalty = 0
+
+        for col in stable_cols:
+            v = _norm_txt(row.get(col, ""))
+            if not v or v == "nan":
+                continue
+            top_val, _ = consensus[col]
+            if v != top_val:
+                penalty += 12
+                issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
+
+        for col in dim_cols:
+            parsed = _parse_dimensions_to_mm(row.get(col, ""))
+            if parsed is None:
+                continue
+            parsed_all = df[col].apply(_parse_dimensions_to_mm)
+            parsed_all = [p for p in parsed_all.tolist() if p is not None]
+            if len(parsed_all) < 6:
+                continue
+            areas = np.array([p[0] * p[1] for p in parsed_all], dtype=float)
+            area = parsed[0] * parsed[1]
+            med = float(np.median(areas))
+            mad = float(np.median(np.abs(areas - med))) + 1e-9
+            z = abs(area - med) / mad
+            if z > 6:
+                penalty += 20
+                issues.append(f"{col.replace('fiche_', '')}: dimensions atypiques (outlier)")
+
+        score = int(min(100, penalty))
+        scores.append(score)
+        issues_list.append(" ; ".join(issues))
+
+    df["score_fiche_technique"] = scores
+    df["ano_fiche_technique"] = df["score_fiche_technique"] >= 25
+    df["fiche_tech_issues"] = issues_list
+    df["nb_fiche_champs_consideres"] = len(stable_cols)
 
     return df
 
@@ -1139,17 +1243,20 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             row_reasons.append("mentionne 'de salon' alors que la majorité des produits semble portable")
             row_actions.append("Vérifier si ce modèle ne devrait pas être dans une autre catégorie (produits de salon)")
 
-        # ---- fiche technique (poids augmenté) ----
-        taux = row.get("taux_fiche_completude", np.nan)
-        if isinstance(taux, (int, float)) and not np.isnan(taux):
-            if taux < 0.3:
+        # ---- ✅ NOUVEAU: fiche technique incohérente (comparaison valeurs) ----
+        ft_score_raw = row.get("score_fiche_technique", 0)
+        if isinstance(ft_score_raw, (int, float)) and not np.isnan(ft_score_raw) and ft_score_raw > 0:
+            if ft_score_raw >= 40:
                 score_ft += 25
-                row_reasons.append("fiche technique très incomplète")
-                row_actions.append("Compléter les champs clés de la fiche technique (dimensions, type, matériaux, etc.)")
-            elif taux < 0.6:
+                row_reasons.append("fiche technique incohérente vs les autres produits de la catégorie")
+                det = row.get("fiche_tech_issues", "")
+                if det:
+                    row_reasons.append(f"détails: {det}")
+                row_actions.append("Vérifier les valeurs de la fiche technique (type, format, dimensions, etc.)")
+            elif ft_score_raw >= 25:
                 score_ft += 12
-                row_reasons.append("fiche technique partiellement complète")
-                row_actions.append("Enrichir la fiche technique avec quelques informations supplémentaires")
+                row_reasons.append("fiche technique légèrement incohérente vs catégorie")
+                row_actions.append("Contrôler la fiche technique sur quelques champs")
 
         # ---- description: couverture des mots-clés titres catégorie ----
         cov = row.get("desc_kw_coverage", np.nan)
@@ -1191,7 +1298,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         actions.append(action_text)
 
         score_ft_list.append(int(score_ft))
-        ano_ft_list.append(bool(score_ft >= 20))
+        ano_ft_list.append(bool(ft_score_raw >= 25))
         score_desc_list.append(int(score_desc))
         ano_desc_list.append(bool(score_desc >= 15))
 
@@ -1421,6 +1528,9 @@ if run:
                         with st.spinner("Analyse images..."):
                             df = compute_image_similarity(df)
 
+                    # ✅ NOUVEAU: score incohérence fiche technique (comparaison valeurs)
+                    df = compute_fiche_technique_incoherence(df, consensus_ratio=0.6)
+
                     df = add_outlier_flags_and_reasons(df, category_main_term)
 
                     # colonnes client + réapplique décisions existantes
@@ -1539,6 +1649,7 @@ if run:
                             "similarite_moyenne", "similarite_categorie",
                             "similarite_image_moyenne", "similarite_forme_moyenne",
                             "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
+                            "fiche_tech_issues", "nb_fiche_champs_consideres",
                         ]
                         cols = [c for c in preferred if c in df_all_products.columns] + [c for c in df_all_products.columns if c not in preferred]
                         df_all_products = df_all_products[cols]
@@ -1613,7 +1724,7 @@ if st.session_state.results_by_category:
                     "similarite_image_moyenne", "similarite_forme_moyenne",
                     "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
                     "category_title_keywords", "desc_kw_coverage",
-                    "score_fiche_technique", "ano_fiche_technique",
+                    "score_fiche_technique", "ano_fiche_technique", "fiche_tech_issues",
                     "score_description", "ano_description",
                     "anomalie_score", "niveau_anomalie", "suspect",
                     "raison_suspecte", "reco_action",
