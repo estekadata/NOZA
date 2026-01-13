@@ -541,11 +541,139 @@ def extract_tech_specs(soup: BeautifulSoup) -> dict:
     return specs
 
 
+# ===================================================
+# ✅ AJOUTS DEMANDÉS (SKU + images description + title qty/size)
+# ===================================================
+
+SKU_REGEX = re.compile(r"\b([A-Z]{3,5}-\d{4})\b")
+
+
+def extract_sku(soup: BeautifulSoup) -> str:
+    """
+    SKU souvent sous le titre, format ex: FERO-1034 / AVAP-0087.
+    On scanne autour du H1 + bloc produit pour être robuste.
+    """
+    h1 = soup.find("h1")
+    if h1:
+        zone = h1.parent.get_text(" ", strip=True) if h1.parent else h1.get_text(" ", strip=True)
+        m = SKU_REGEX.search(zone)
+        if m:
+            return m.group(1)
+
+    txt = soup.get_text(" ", strip=True)
+    m = SKU_REGEX.search(txt)
+    return m.group(1) if m else ""
+
+
+def extract_description_block(soup: BeautifulSoup):
+    """
+    Retourne:
+    - description_txt : texte propre
+    - description_html : html brut du bloc
+    - desc_img_urls : liste d'URLs d'images trouvées dans le bloc description
+    """
+    h_desc = None
+    for tag in soup.find_all(["h2", "h3"]):
+        if "Description" in tag.get_text(strip=True):
+            h_desc = tag
+            break
+    if not h_desc:
+        return "", "", []
+
+    nodes = []
+    for sib in h_desc.next_siblings:
+        name = getattr(sib, "name", None)
+        if name in ("h2", "h3"):
+            break
+        if getattr(sib, "name", None) is not None:
+            nodes.append(sib)
+
+    if not nodes:
+        return "", "", []
+
+    description_html = "".join(str(n) for n in nodes)
+
+    parts = []
+    for n in nodes:
+        txt = n.get_text(" ", strip=True) if hasattr(n, "get_text") else ""
+        if txt:
+            parts.append(txt)
+    description_txt = " ".join(parts)
+
+    desc_img_urls = []
+    for n in nodes:
+        for img in n.find_all("img"):
+            src = img.get("src") or img.get("data-src") or img.get("data-original")
+            if src:
+                desc_img_urls.append(absolutize_url(src))
+
+    seen = set()
+    desc_img_urls = [u for u in desc_img_urls if not (u in seen or seen.add(u))]
+
+    return description_txt, description_html, desc_img_urls
+
+
+def check_image_url_ok(url: str) -> (bool, str):
+    """
+    Check simple: url valide + request OK + content-type image.
+    """
+    if not url or not isinstance(url, str):
+        return False, "url vide"
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10, stream=True)
+        if r.status_code >= 400:
+            return False, f"http {r.status_code}"
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if "image" not in ctype:
+            return False, f"content-type={ctype or 'inconnu'}"
+        return True, "ok"
+    except Exception as e:
+        return False, f"erreur: {e}"
+
+
+def title_qty_size_signals(title: str) -> dict:
+    """
+    Repérage dans le titre:
+    - quantité: X48, x 48, lot de 3, pack 10
+    - taille: 23CM, 23 CM, 0.5L, 500ML, 1.2M, 10MM, 2G, etc.
+    """
+    t = (title or "").strip()
+
+    qty = None
+    m = re.search(r"(?i)\b[x×]\s?(\d{1,4})\b", t)
+    if m:
+        qty = int(m.group(1))
+    else:
+        m = re.search(r"(?i)\b(lot|pack)\s*(de)?\s*(\d{1,4})\b", t)
+        if m:
+            qty = int(m.group(3))
+
+    size_raw = ""
+    size_val = None
+    size_unit = ""
+
+    m = re.search(r"(?i)\b(\d+(?:[.,]\d+)?)\s?(cm|mm|m|ml|l|g|kg)\b", t)
+    if m:
+        size_raw = m.group(0)
+        size_val = float(m.group(1).replace(",", "."))
+        size_unit = m.group(2).lower()
+
+    return {
+        "title_qty": qty if qty is not None else "",
+        "title_size_raw": size_raw,
+        "title_size_value": size_val if size_val is not None else "",
+        "title_size_unit": size_unit,
+    }
+
+
 def scrape_product(url: str) -> dict:
     soup = get_soup(url)
 
     title_tag = soup.find("h1")
     name = title_tag.get_text(strip=True) if title_tag else ""
+
+    sku = extract_sku(soup)
 
     brand = ""
     for p in soup.find_all("p"):
@@ -555,20 +683,56 @@ def scrape_product(url: str) -> dict:
             break
 
     price = extract_price(soup)
-    description = extract_description(soup)
+
+    description, description_html, desc_img_urls = extract_description_block(soup)
+
     caracteristiques_list = extract_caracteristiques(soup)
     caracteristiques = " | ".join(caracteristiques_list)
+
     image_url = extract_image_url(soup)
+
+    desc_img_ok = []
+    desc_img_reason = []
+    desc_img_sim_to_main = []
+
+    main_img = download_pil_image(image_url) if image_url else None
+    main_ph = imagehash.phash(main_img) if main_img is not None else None
+
+    for u in desc_img_urls:
+        ok, reason = check_image_url_ok(u)
+        desc_img_ok.append(ok)
+        desc_img_reason.append(reason)
+
+        sim = ""
+        if ok and main_ph is not None:
+            img2 = download_pil_image(u)
+            if img2 is not None:
+                try:
+                    ph2 = imagehash.phash(img2)
+                    sim = round(phash_similarity(main_ph, ph2), 3)
+                except Exception:
+                    sim = ""
+        desc_img_sim_to_main.append(sim)
+
+    signals = title_qty_size_signals(name)
+
     tech_specs = extract_tech_specs(soup)
 
     data = {
         "url": url,
         "nom": name,
+        "sku": sku,
         "marque": brand,
         "prix": price,
         "caracteristiques": caracteristiques,
         "description": description,
+        "description_html": description_html,
+        "desc_img_urls": " | ".join(desc_img_urls),
+        "desc_img_ok": " | ".join([str(x) for x in desc_img_ok]),
+        "desc_img_reason": " | ".join(desc_img_reason),
+        "desc_img_sim_to_main": " | ".join([str(x) for x in desc_img_sim_to_main]),
         "image_url": image_url,
+        **signals,
     }
 
     for k, v in tech_specs.items():
@@ -721,12 +885,17 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
     stable_cols = []
     consensus = {}
     for col in fiche_cols:
+        # ✅ DEMANDE CLIENT: ignorer le champ "dimensions" dans l'analyse
+        if "dimension" in col:
+            continue
+
         top_val, ratio = _tech_field_consensus(df[col], min_ratio=consensus_ratio)
         if top_val:
             stable_cols.append(col)
             consensus[col] = (top_val, ratio)
 
-    dim_cols = [c for c in fiche_cols if "dimension" in c]
+    # ✅ DEMANDE CLIENT: ignorer COMPLETEMENT dimensions
+    dim_cols = []
 
     issues_list = []
     scores = []
@@ -744,22 +913,7 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
                 penalty += 12
                 issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
 
-        for col in dim_cols:
-            parsed = _parse_dimensions_to_mm(row.get(col, ""))
-            if parsed is None:
-                continue
-            parsed_all = df[col].apply(_parse_dimensions_to_mm)
-            parsed_all = [p for p in parsed_all.tolist() if p is not None]
-            if len(parsed_all) < 6:
-                continue
-            areas = np.array([p[0] * p[1] for p in parsed_all], dtype=float)
-            area = parsed[0] * parsed[1]
-            med = float(np.median(areas))
-            mad = float(np.median(np.abs(areas - med))) + 1e-9
-            z = abs(area - med) / mad
-            if z > 6:
-                penalty += 20
-                issues.append(f"{col.replace('fiche_', '')}: dimensions atypiques (outlier)")
+        # dim_cols volontairement vide (pas d'analyse dimensions)
 
         score = int(min(100, penalty))
         scores.append(score)
@@ -802,26 +956,26 @@ def description_keyword_coverage(desc: str, keywords: list) -> float:
 
 
 # ===================================================
-# SIMILARITÉ TEXTE (produit-produit + produit-catégorie)
+# SIMILARITÉ TEXTE (produit-catégorie) ✅ sans texte global
 # ===================================================
 
 def compute_similarity(df: pd.DataFrame, category_intro_text: str) -> pd.DataFrame:
-    if df.empty or len(df) == 1:
-        df["similarite_moyenne"] = 1.0
-        df["mots_cles_principaux"] = ""
+    """
+    Version "sans texte global":
+    - On NE calcule PLUS similarite_moyenne (produit-produit).
+    - On garde similarite_categorie: (titre + description) vs texte catégorie.
+    """
+    if df.empty:
         df["similarite_categorie"] = 1.0
+        df["mots_cles_principaux"] = ""
         return df
 
     product_texts = (
-        df.get("nom", "").fillna("") + " " +
-        df.get("description", "").fillna("") + " " +
-        df.get("caracteristiques", "").fillna("")
+        df.get("nom", "").fillna("").astype(str) + " " +
+        df.get("description", "").fillna("").astype(str)
     )
 
     cat_text = (category_intro_text or "").strip()
-    if not cat_text:
-        cat_text = ""
-
     all_texts = pd.concat([product_texts, pd.Series([cat_text])], ignore_index=True)
 
     vectorizer = TfidfVectorizer(
@@ -830,29 +984,21 @@ def compute_similarity(df: pd.DataFrame, category_intro_text: str) -> pd.DataFra
         min_df=1
     )
     X_all = vectorizer.fit_transform(all_texts)
-
     X_prod = X_all[:-1]
     X_cat = X_all[-1]
-
-    sim_matrix = cosine_similarity(X_prod)
-    n = sim_matrix.shape[0]
-    avg_sim = (sim_matrix.sum(axis=1) - 1.0) / (n - 1)
-    df["similarite_moyenne"] = np.asarray(avg_sim).ravel()
 
     sim_cat = cosine_similarity(X_prod, X_cat)
     df["similarite_categorie"] = np.asarray(sim_cat).ravel()
 
     feature_names = np.array(vectorizer.get_feature_names_out())
     main_terms = []
-
-    for i in range(n):
+    for i in range(X_prod.shape[0]):
         row = X_prod[i].toarray()[0]
         if (row > 0).sum() == 0:
             main_terms.append("")
             continue
         top_idx = row.argsort()[-7:][::-1]
-        terms = feature_names[top_idx]
-        terms = [t for t in terms if len(t) > 2]
+        terms = [t for t in feature_names[top_idx] if len(t) > 2]
         main_terms.append(", ".join(terms[:5]))
 
     df["mots_cles_principaux"] = main_terms
@@ -1173,7 +1319,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         df["ano_description"] = False
         return df
 
-    threshold_sim = float(np.nanquantile(df["similarite_moyenne"], 0.10)) if "similarite_moyenne" in df.columns else None
+    # ✅ DEMANDE CLIENT: suppression du "texte global" => on ne calcule plus similarite_moyenne
     threshold_img = float(np.nanquantile(df["similarite_image_moyenne"], 0.05)) if "similarite_image_moyenne" in df.columns and df["similarite_image_moyenne"].notna().any() else None
     threshold_cat = float(np.nanquantile(df["similarite_categorie"], 0.10)) if "similarite_categorie" in df.columns and df["similarite_categorie"].notna().any() else None
 
@@ -1198,13 +1344,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         score_ft = 0
         score_desc = 0
 
-        if threshold_sim is not None:
-            sim = row.get("similarite_moyenne", 1.0)
-            if isinstance(sim, (int, float)) and not np.isnan(sim) and sim < threshold_sim:
-                score += 20
-                row_reasons.append("texte global assez différent des autres produits")
-                row_actions.append("Vérifier si le produit est bien dans la bonne catégorie et si le descriptif est aligné")
-
         if threshold_cat is not None:
             simc = row.get("similarite_categorie", np.nan)
             if isinstance(simc, (int, float)) and not np.isnan(simc) and simc < threshold_cat:
@@ -1218,6 +1357,31 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 score += 20
                 row_reasons.append("image très différente des autres produits de la catégorie")
                 row_actions.append("Vérifier si l’image correspond bien au produit et à la catégorie")
+
+        # ✅ DEMANDE CLIENT: vérif image(s) incluse(s) dans la description (balise cassée / hors sujet)
+        desc_ok = str(row.get("desc_img_ok", "")).lower()
+        desc_sims = str(row.get("desc_img_sim_to_main", ""))
+
+        if desc_ok and desc_ok != "nan":
+            oks = [x.strip() for x in desc_ok.split("|") if x.strip()]
+            bad = any(x in ("false", "0") for x in oks)
+            if bad:
+                score += 15
+                row_reasons.append("image(s) dans la description cassée(s) / non chargée(s)")
+                row_actions.append("Corriger la/les balises <img> dans la description (src, media, cache, etc.)")
+
+        try:
+            sims = []
+            for s in desc_sims.split("|"):
+                s = s.strip()
+                if s and s not in ("nan", ""):
+                    sims.append(float(s))
+            if sims and min(sims) < 0.35:
+                score += 10
+                row_reasons.append("image(s) intégrée(s) à la description potentiellement hors-sujet")
+                row_actions.append("Vérifier l’image intégrée dans la description (cohérence produit)")
+        except Exception:
+            pass
 
         is_capsule = row.get("has_capsule_word", False)
         is_accessoire = row.get("has_accessoire_word", False)
@@ -1252,7 +1416,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 det = row.get("fiche_tech_issues", "")
                 if det:
                     row_reasons.append(f"détails: {det}")
-                row_actions.append("Vérifier les valeurs de la fiche technique (type, format, dimensions, etc.)")
+                row_actions.append("Vérifier les valeurs de la fiche technique (type, format, etc.)")
             elif ft_score_raw >= 25:
                 score_ft += 12
                 row_reasons.append("fiche technique légèrement incohérente vs catégorie")
@@ -1502,11 +1666,21 @@ if run:
                             product = {
                                 "url": prod_url,
                                 "nom": "ERREUR",
+                                "sku": "",
                                 "marque": "",
                                 "prix": "",
                                 "caracteristiques": f"Erreur: {e}",
                                 "description": "",
+                                "description_html": "",
+                                "desc_img_urls": "",
+                                "desc_img_ok": "",
+                                "desc_img_reason": "",
+                                "desc_img_sim_to_main": "",
                                 "image_url": "",
+                                "title_qty": "",
+                                "title_size_raw": "",
+                                "title_size_value": "",
+                                "title_size_unit": "",
                             }
                         results.append(product)
 
@@ -1520,6 +1694,8 @@ if run:
                     )
 
                     df = enrich_structured_features(df, category_main_term)
+
+                    # ✅ compute_similarity sans texte global
                     df = compute_similarity(df, category_intro)
 
                     if analyse_image:
@@ -1528,7 +1704,7 @@ if run:
                         with st.spinner("Analyse images..."):
                             df = compute_image_similarity(df)
 
-                    # ✅ NOUVEAU: score incohérence fiche technique (comparaison valeurs)
+                    # ✅ score incohérence fiche technique (comparaison valeurs), sans dimensions
                     df = compute_fiche_technique_incoherence(df, consensus_ratio=0.6)
 
                     df = add_outlier_flags_and_reasons(df, category_main_term)
@@ -1719,13 +1895,15 @@ if st.session_state.results_by_category:
 
             if "anomalie_score" in df_final.columns:
                 cols = [
-                    "nom", "marque", "prix", "prix_num",
-                    "similarite_moyenne", "similarite_categorie",
+                    "nom", "sku", "marque", "prix", "prix_num",
+                    "title_qty", "title_size_raw", "title_size_value", "title_size_unit",
+                    "similarite_categorie",
                     "similarite_image_moyenne", "similarite_forme_moyenne",
                     "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
                     "category_title_keywords", "desc_kw_coverage",
                     "score_fiche_technique", "ano_fiche_technique", "fiche_tech_issues",
                     "score_description", "ano_description",
+                    "desc_img_urls", "desc_img_ok", "desc_img_reason", "desc_img_sim_to_main",
                     "anomalie_score", "niveau_anomalie", "suspect",
                     "raison_suspecte", "reco_action",
                     "decision_client", "exclure_prochaine_analyse",
