@@ -3,7 +3,7 @@ import os
 import re
 import json
 import glob
-import time  # ✅ AJOUT (heartbeat)
+import time  # ✅ heartbeat
 from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
@@ -19,7 +19,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from PIL import Image, ImageFilter, ImageOps
-import imagehash  # garde pour le fallback pHash
+import imagehash  # fallback pHash
 
 
 # minoré l'impact de la longueur du texte, Le prix peut etre un indicateur pour valider
@@ -88,6 +88,14 @@ st.set_page_config(page_title="Scraper S-Factory + Similarité", layout="wide")
 if "results_by_category" not in st.session_state:
     st.session_state.results_by_category = []  # list[dict]
 
+# ✅ Export columns state
+if "available_export_cols" not in st.session_state:
+    st.session_state.available_export_cols = []
+if "export_mode" not in st.session_state:
+    st.session_state.export_mode = "Complet (toutes colonnes)"
+if "selected_export_cols" not in st.session_state:
+    st.session_state.selected_export_cols = []
+
 
 # ==== état global CLIP ====
 CLIP_MODEL = None
@@ -108,6 +116,52 @@ def init_clip():
     model.eval()
     CLIP_MODEL = model
     CLIP_PREPROCESS = preprocess
+
+
+# ===================================================
+# EXPORT COLUMNS (✅ NEW)
+# ===================================================
+
+DEFAULT_EXPORT_COLS = [
+    "category_url", "category_title", "mot_cle_principal",
+    "nom", "sku", "marque", "prix", "prix_num",
+    "anomalie_score", "niveau_anomalie", "suspect",
+    "score_fiche_technique", "ano_fiche_technique", "fiche_tech_issues",
+    "score_description", "ano_description",
+    "raison_suspecte", "reco_action",
+    "decision_client", "exclure_prochaine_analyse",
+    "category_title_keywords", "desc_kw_coverage",
+    "url", "image_url",
+    "similarite_categorie",
+    "similarite_image_moyenne", "similarite_forme_moyenne",
+    "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
+    "desc_img_urls", "desc_img_ok", "desc_img_reason", "desc_img_sim_to_main",
+]
+
+
+def apply_export_columns(df: pd.DataFrame, selected_cols: list, export_mode: str) -> pd.DataFrame:
+    """
+    Filtre les colonnes à exporter.
+    Sécurité: garde au minimum 'url' et 'decision_client' si présents (sinon tu perds l'historique client).
+    """
+    if df is None or df.empty:
+        return df
+    if export_mode != "Sélection de colonnes":
+        return df
+
+    selected_cols = [c for c in (selected_cols or []) if c in df.columns]
+
+    must_keep = []
+    for c in ["url", "decision_client"]:
+        if c in df.columns and c not in selected_cols:
+            must_keep.append(c)
+
+    selected_cols = must_keep + selected_cols
+
+    if not selected_cols:
+        return df
+
+    return df[selected_cols]
 
 
 # ===================================================
@@ -278,7 +332,6 @@ def delete_all_tabs_except(sh, keep_titles: set):
     """
     Supprime tous les onglets sauf ceux listés.
     Attention: le tableur doit garder au moins 1 onglet.
-    On force donc la création des onglets 'keep' avant suppression.
     """
     for t in keep_titles:
         ensure_worksheet(sh, t)
@@ -290,7 +343,6 @@ def delete_all_tabs_except(sh, keep_titles: set):
         try:
             sh.del_worksheet(ws)
         except Exception:
-            # si un onglet refuse de mourir, on ne bloque pas tout le run
             pass
 
 
@@ -542,7 +594,7 @@ def extract_tech_specs(soup: BeautifulSoup) -> dict:
 
 
 # ===================================================
-# ✅ AJOUTS DEMANDÉS (SKU + images description + title qty/size)
+# ✅ AJOUTS (SKU + images description + title qty/size)
 # ===================================================
 
 SKU_REGEX = re.compile(r"\b([A-Z]{3,5}-\d{4})\b")
@@ -551,7 +603,6 @@ SKU_REGEX = re.compile(r"\b([A-Z]{3,5}-\d{4})\b")
 def extract_sku(soup: BeautifulSoup) -> str:
     """
     SKU souvent sous le titre, format ex: FERO-1034 / AVAP-0087.
-    On scanne autour du H1 + bloc produit pour être robuste.
     """
     h1 = soup.find("h1")
     if h1:
@@ -665,6 +716,26 @@ def title_qty_size_signals(title: str) -> dict:
         "title_size_value": size_val if size_val is not None else "",
         "title_size_unit": size_unit,
     }
+
+
+# ===================================================
+# IMAGE UTILS (needed by scrape_product)
+# ===================================================
+
+def download_pil_image(url: str):
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        return Image.open(io.BytesIO(resp.content)).convert("RGB")
+    except Exception:
+        return None
+
+
+def phash_similarity(h1, h2) -> float:
+    if h1 is None or h2 is None:
+        return np.nan
+    dist = h1 - h2
+    return float(1 - (dist / 64))
 
 
 def scrape_product(url: str) -> dict:
@@ -805,7 +876,6 @@ def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.
 
     df["description_len"] = df["description"].fillna("").str.len()
 
-    # (on garde ces colonnes, mais elles ne pilotent plus l'anomalie fiche technique)
     fiche_cols = [c for c in df.columns if c.startswith("fiche_")]
     df["nb_fiche_champs"] = len(fiche_cols)
     if fiche_cols:
@@ -822,7 +892,7 @@ def enrich_structured_features(df: pd.DataFrame, category_main_term: str) -> pd.
 
 
 # ===================================================
-# ✅ NOUVEAU: COHÉRENCE FICHE TECHNIQUE (comparaison valeurs)
+# ✅ COHÉRENCE FICHE TECHNIQUE (comparaison valeurs)
 # ===================================================
 
 def _norm_txt(v) -> str:
@@ -832,25 +902,6 @@ def _norm_txt(v) -> str:
     s = re.sub(r"\s+", " ", s)
     s = s.replace("’", "'")
     return s
-
-
-def _parse_dimensions_to_mm(val: str):
-    s = _norm_txt(val)
-    if not s:
-        return None
-    s = s.replace("×", "x").replace("*", "x")
-    unit = "mm"
-    if "cm" in s:
-        unit = "cm"
-    nums = re.findall(r"(\d+(?:[.,]\d+)?)", s)
-    if len(nums) < 2:
-        return None
-    a = float(nums[0].replace(",", "."))
-    b = float(nums[1].replace(",", "."))
-    if unit == "cm":
-        a *= 10
-        b *= 10
-    return (a, b)
 
 
 def _tech_field_consensus(series: pd.Series, min_ratio: float = 0.6):
@@ -885,17 +936,13 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
     stable_cols = []
     consensus = {}
     for col in fiche_cols:
-        # ✅ DEMANDE CLIENT: ignorer le champ "dimensions" dans l'analyse
+        # ✅ ignorer dimensions
         if "dimension" in col:
             continue
-
         top_val, ratio = _tech_field_consensus(df[col], min_ratio=consensus_ratio)
         if top_val:
             stable_cols.append(col)
             consensus[col] = (top_val, ratio)
-
-    # ✅ DEMANDE CLIENT: ignorer COMPLETEMENT dimensions
-    dim_cols = []
 
     issues_list = []
     scores = []
@@ -912,8 +959,6 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
             if v != top_val:
                 penalty += 12
                 issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
-
-        # dim_cols volontairement vide (pas d'analyse dimensions)
 
         score = int(min(100, penalty))
         scores.append(score)
@@ -1029,15 +1074,6 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def download_pil_image(url: str):
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content)).convert("RGB")
-    except Exception:
-        return None
-
-
 def crop_to_object(img: Image.Image, white_thresh: int = 245, margin: float = 0.10) -> Image.Image:
     arr = np.asarray(img.convert("RGB"), dtype=np.uint8)
     non_white = np.any(arr < white_thresh, axis=2)
@@ -1096,13 +1132,6 @@ def shape_signature(img: Image.Image, size=128) -> np.ndarray:
 
     hist, _ = np.histogram(arr.ravel(), bins=32, range=(0, 255))
     return _l2_normalize(hist.astype(np.float32))
-
-
-def phash_similarity(h1, h2) -> float:
-    if h1 is None or h2 is None:
-        return np.nan
-    dist = h1 - h2
-    return float(1 - (dist / 64))
 
 
 def get_clip_embedding(url: str):
@@ -1319,7 +1348,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         df["ano_description"] = False
         return df
 
-    # ✅ DEMANDE CLIENT: suppression du "texte global" => on ne calcule plus similarite_moyenne
     threshold_img = float(np.nanquantile(df["similarite_image_moyenne"], 0.05)) if "similarite_image_moyenne" in df.columns and df["similarite_image_moyenne"].notna().any() else None
     threshold_cat = float(np.nanquantile(df["similarite_categorie"], 0.10)) if "similarite_categorie" in df.columns and df["similarite_categorie"].notna().any() else None
 
@@ -1358,7 +1386,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 row_reasons.append("image très différente des autres produits de la catégorie")
                 row_actions.append("Vérifier si l’image correspond bien au produit et à la catégorie")
 
-        # ✅ DEMANDE CLIENT: vérif image(s) incluse(s) dans la description (balise cassée / hors sujet)
+        # vérif images dans description (cassée / hors sujet)
         desc_ok = str(row.get("desc_img_ok", "")).lower()
         desc_sims = str(row.get("desc_img_sim_to_main", ""))
 
@@ -1407,7 +1435,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             row_reasons.append("mentionne 'de salon' alors que la majorité des produits semble portable")
             row_actions.append("Vérifier si ce modèle ne devrait pas être dans une autre catégorie (produits de salon)")
 
-        # ---- ✅ NOUVEAU: fiche technique incohérente (comparaison valeurs) ----
+        # fiche technique incohérente (comparaison valeurs)
         ft_score_raw = row.get("score_fiche_technique", 0)
         if isinstance(ft_score_raw, (int, float)) and not np.isnan(ft_score_raw) and ft_score_raw > 0:
             if ft_score_raw >= 40:
@@ -1422,7 +1450,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 row_reasons.append("fiche technique légèrement incohérente vs catégorie")
                 row_actions.append("Contrôler la fiche technique sur quelques champs")
 
-        # ---- description: couverture des mots-clés titres catégorie ----
+        # description: couverture des mots-clés titres catégorie
         cov = row.get("desc_kw_coverage", np.nan)
         if isinstance(cov, (int, float)) and not np.isnan(cov) and cov < 0.20:
             score_desc += 15
@@ -1431,7 +1459,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
 
         score += score_ft + score_desc
 
-        # ---- prix comme indicateur de confirmation (pas déclencheur principal) ----
+        # prix comme indicateur de confirmation (pas déclencheur principal)
         prix = row.get("prix_num")
         if score >= 30 and q1 is not None and isinstance(prix, (int, float)) and not np.isnan(prix):
             if prix < q1 or prix > q3:
@@ -1493,7 +1521,6 @@ def add_client_decision_columns(df: pd.DataFrame, decisions_map: Optional[dict] 
     if "decision_client" not in df.columns:
         df["decision_client"] = ""
 
-    # réappliquer les décisions du client si elles existent déjà dans ALL_PRODUCTS
     if decisions_map:
         urls = df["url"].astype(str).tolist()
         df["decision_client"] = [
@@ -1561,9 +1588,33 @@ with st.sidebar:
         except Exception:
             pass
 
+    # ✅ NEW: choix colonnes export
+    st.divider()
+    st.subheader("Colonnes à exporter")
+
+    export_mode = st.radio(
+        "Mode export",
+        ["Complet (toutes colonnes)", "Sélection de colonnes"],
+        index=0 if st.session_state.export_mode == "Complet (toutes colonnes)" else 1
+    )
+    st.session_state.export_mode = export_mode
+
+    available_cols = st.session_state.get("available_export_cols", []) or DEFAULT_EXPORT_COLS
+    default_cols = [c for c in DEFAULT_EXPORT_COLS if c in available_cols]
+
+    selected_export_cols = []
+    if export_mode == "Sélection de colonnes":
+        st.caption("S'applique à: onglets catégorie + ALL_PRODUCTS + SUSPECTS + CSV téléchargés.")
+        selected_export_cols = st.multiselect(
+            "Colonnes à exporter",
+            options=available_cols,
+            default=st.session_state.selected_export_cols or default_cols
+        )
+    st.session_state.selected_export_cols = selected_export_cols
+
 run = st.button("Lancer le scraping & l'analyse (toutes catégories)")
 
-# ✅ AJOUT: zones d'affichage "le code vit"
+# ✅ zones d'affichage "le code vit"
 heartbeat = st.empty()
 prod_status = st.empty()
 prod_prog = st.empty()
@@ -1609,12 +1660,11 @@ if run:
         prog = st.progress(0)
         status = st.empty()
 
-        last_heartbeat = 0.0  # ✅ AJOUT
+        last_heartbeat = 0.0
 
         for idx_cat, category_url in enumerate(category_urls, start=1):
             status.write(f"Catégorie {idx_cat}/{len(category_urls)} : {category_url}")
 
-            # ✅ AJOUT heartbeat (catégorie)
             now = time.time()
             if now - last_heartbeat > 1.0:
                 heartbeat.info(f"🔄 En cours… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
@@ -1630,11 +1680,9 @@ if run:
                 with st.spinner("Récupération URLs produits (pagination incluse)..."):
                     product_urls = get_product_urls(category_url, max_pages=int(max_pages))
 
-                # ✅ AJOUT: reset barre produit
                 prod_status.write("")
                 prod_prog.progress(0)
 
-                # exclusions persistantes
                 if sh is not None:
                     try:
                         excluded = load_excluded_urls(sh, category_url)
@@ -1650,7 +1698,6 @@ if run:
                     total_prod = len(product_urls)
 
                     for i, prod_url in enumerate(product_urls):
-                        # ✅ AJOUT heartbeat + progression produit
                         if i == 0 or (time.time() - last_heartbeat) > 1.0:
                             heartbeat.info(
                                 f"🧱 Scraping produits… {i+1}/{total_prod} – catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}"
@@ -1686,7 +1733,6 @@ if run:
 
                     df = pd.DataFrame(results)
 
-                    # mots-clés basés sur les TITRES produits de la catégorie
                     common_title_terms = compute_common_title_terms(df, top_k=12)
                     df["category_title_keywords"] = ", ".join(common_title_terms)
                     df["desc_kw_coverage"] = df["description"].fillna("").astype(str).apply(
@@ -1695,21 +1741,17 @@ if run:
 
                     df = enrich_structured_features(df, category_main_term)
 
-                    # ✅ compute_similarity sans texte global
                     df = compute_similarity(df, category_intro)
 
                     if analyse_image:
-                        # ✅ AJOUT heartbeat (images)
                         heartbeat.info(f"🖼️ Analyse images… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
                         with st.spinner("Analyse images..."):
                             df = compute_image_similarity(df)
 
-                    # ✅ score incohérence fiche technique (comparaison valeurs), sans dimensions
                     df = compute_fiche_technique_incoherence(df, consensus_ratio=0.6)
 
                     df = add_outlier_flags_and_reasons(df, category_main_term)
 
-                    # colonnes client + réapplique décisions existantes
                     df = add_client_decision_columns(df, decisions_map=decisions_map)
 
                 st.session_state.results_by_category.append({
@@ -1736,6 +1778,15 @@ if run:
         status.success("Traitement terminé.")
         heartbeat.success(f"✅ Terminé – {datetime.now().strftime('%H:%M:%S')}")
 
+        # ✅ NEW: construire les colonnes disponibles après scraping
+        all_cols = set()
+        for item in st.session_state.results_by_category:
+            df_tmp = item.get("df", pd.DataFrame())
+            if not df_tmp.empty:
+                all_cols.update(df_tmp.columns.tolist())
+        all_cols.update(["category_url", "category_title", "mot_cle_principal"])
+        st.session_state.available_export_cols = sorted(all_cols)
+
         # ===================================================
         # EXPORT SHEETS
         # ===================================================
@@ -1745,7 +1796,6 @@ if run:
                 st.warning("Vérifie que le tableur est partagé avec l’email du service account.")
             else:
                 try:
-                    # ✅ AJOUT heartbeat (export)
                     heartbeat.info(f"📤 Export Google Sheets… {datetime.now().strftime('%H:%M:%S')}")
 
                     summary_rows = []
@@ -1761,15 +1811,14 @@ if run:
                         if df_all.empty:
                             df_all = pd.DataFrame({"info": [f"Aucun produit (ou tous exclus) pour: {cat_url}"]})
                         else:
-                            # enrich global ALL_PRODUCTS
                             df_all.insert(0, "category_url", cat_url)
                             df_all.insert(1, "category_title", item["category_title"])
                             df_all.insert(2, "mot_cle_principal", item["category_main_term"])
-
                             all_products_rows.append(df_all)
 
-                        # onglet catégorie
-                        write_df_to_sheet(sh, tab_title, df_all)
+                        # ✅ appliquer filtre colonnes à l'export
+                        df_export = apply_export_columns(df_all, st.session_state.selected_export_cols, st.session_state.export_mode)
+                        write_df_to_sheet(sh, tab_title, df_export)
 
                         # suspects
                         if "suspect" in df_all.columns:
@@ -1795,7 +1844,6 @@ if run:
                             "date_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         })
 
-                        # mise à jour exclusions
                         update_exclusions_from_df(sh, cat_url, item["df"])
 
                     df_summary = pd.DataFrame(summary_rows)
@@ -1803,33 +1851,15 @@ if run:
 
                     if all_suspects_rows:
                         df_sus_all = pd.concat(all_suspects_rows, ignore_index=True)
-                        write_df_to_sheet(sh, "SUSPECTS", df_sus_all)
+                        df_sus_export = apply_export_columns(df_sus_all, st.session_state.selected_export_cols, st.session_state.export_mode)
+                        write_df_to_sheet(sh, "SUSPECTS", df_sus_export)
                     else:
                         write_df_to_sheet(sh, "SUSPECTS", pd.DataFrame({"info": ["Aucun suspect"]}))
 
-                    # ✅ ALL_PRODUCTS (tout le monde, au cas où)
+                    # ALL_PRODUCTS
                     if all_products_rows:
                         df_all_products = pd.concat(all_products_rows, ignore_index=True)
-
-                        # colonnes “nécessaires” en priorité
-                        preferred = [
-                            "category_url", "category_title", "mot_cle_principal",
-                            "nom", "marque", "prix", "prix_num",
-                            "anomalie_score", "niveau_anomalie", "suspect",
-                            "score_fiche_technique", "ano_fiche_technique",
-                            "score_description", "ano_description",
-                            "raison_suspecte", "reco_action",
-                            "decision_client", "exclure_prochaine_analyse",
-                            "category_title_keywords", "desc_kw_coverage",
-                            "url", "image_url",
-                            "similarite_moyenne", "similarite_categorie",
-                            "similarite_image_moyenne", "similarite_forme_moyenne",
-                            "similarite_couleur_moyenne", "similarite_image_globale_moyenne",
-                            "fiche_tech_issues", "nb_fiche_champs_consideres",
-                        ]
-                        cols = [c for c in preferred if c in df_all_products.columns] + [c for c in df_all_products.columns if c not in preferred]
-                        df_all_products = df_all_products[cols]
-
+                        df_all_products = apply_export_columns(df_all_products, st.session_state.selected_export_cols, st.session_state.export_mode)
                         write_df_to_sheet(sh, "ALL_PRODUCTS", df_all_products)
                     else:
                         write_df_to_sheet(sh, "ALL_PRODUCTS", pd.DataFrame({"info": ["Aucun produit"]}))
@@ -1859,7 +1889,9 @@ if st.session_state.results_by_category:
 
     if dfs:
         df_global = pd.concat(dfs, ignore_index=True)
-        csv_global = df_global.to_csv(index=False).encode("utf-8")
+        df_export_global = apply_export_columns(df_global, st.session_state.selected_export_cols, st.session_state.export_mode)
+        csv_global = df_export_global.to_csv(index=False).encode("utf-8")
+
         st.download_button(
             "Télécharger le CSV (toutes catégories)",
             csv_global,
@@ -1885,7 +1917,8 @@ if st.session_state.results_by_category:
 
             st.dataframe(df_final, use_container_width=True)
 
-            csv = df_final.to_csv(index=False).encode("utf-8")
+            df_export_cat = apply_export_columns(df_final, st.session_state.selected_export_cols, st.session_state.export_mode)
+            csv = df_export_cat.to_csv(index=False).encode("utf-8")
             st.download_button(
                 f"Télécharger le CSV ({sanitize_sheet_title(item['category_title'] or get_category_slug(cat_url))})",
                 csv,
