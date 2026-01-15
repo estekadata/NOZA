@@ -411,9 +411,17 @@ def build_category_main_term(category_title: str, category_url: str) -> str:
     return tokens[0] if tokens else "produit"
 
 
-def get_product_urls(category_url: str, max_pages: int = 80) -> list:
-    slug = get_category_slug(category_url)
+# ===================================================
+# ✅ PATCH MINIMAL ICI (get_product_urls)
+# ===================================================
 
+def get_product_urls(category_url: str, max_pages: int = 80) -> list:
+    """
+    PATCH:
+    - Ne filtre plus les URLs produit avec (slug in href) => évite de rater des produits listés.
+    - Utilise des sélecteurs produits (Magento) en priorité.
+    - Fallback sur tous les liens .html si aucun sélecteur ne retourne de résultat.
+    """
     urls = set()
     visited_pages = set()
     current = category_url
@@ -425,13 +433,28 @@ def get_product_urls(category_url: str, max_pages: int = 80) -> list:
 
         soup = get_soup(current)
 
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if not href.endswith(".html"):
-                continue
-            if slug and slug not in href:
-                continue
-            urls.add(absolutize_url(href))
+        # 1) Sélecteurs produits (priorité)
+        selectors = [
+            "a.product-item-link[href]",
+            "h2.product-name a[href]",
+            ".product-name a[href]",
+            "a.product-image[href]",
+        ]
+        page_urls = set()
+        for sel in selectors:
+            for a in soup.select(sel):
+                href = a.get("href", "")
+                if href and href.endswith(".html"):
+                    page_urls.add(absolutize_url(href))
+
+        # 2) Fallback: tout .html (sans filtrer par slug)
+        if not page_urls:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href and href.endswith(".html"):
+                    page_urls.add(absolutize_url(href))
+
+        urls.update(page_urls)
 
         next_url = find_next_page_url(soup, current)
         if not next_url:
@@ -866,7 +889,24 @@ def _tech_field_consensus(series: pd.Series, min_ratio: float = 0.6):
     return ("", ratio)
 
 
-def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float = 0.6) -> pd.DataFrame:
+# ===================================================
+# ✅ PATCH MINIMAL: DETECTION VALEURS RARES EN FICHE TECHNIQUE
+# ===================================================
+def compute_fiche_technique_incoherence(
+    df: pd.DataFrame,
+    consensus_ratio: float = 0.6,
+    rare_ratio: float = 0.15,   # ✅ seuil rareté
+    min_support: int = 8        # ✅ min produits non vides pour juger un champ
+) -> pd.DataFrame:
+    """
+    Compare les valeurs de fiche technique entre produits d'une même catégorie.
+
+    ✅ Patch:
+    - garde l'approche "consensus" (valeur dominante >= consensus_ratio)
+    - AJOUTE une détection de rareté: si une valeur apparaît <= rare_ratio des produits,
+      alors elle est signalée (utile pour Tube vs Roll/Cône/Carnet)
+    - ignore les champs contenant "dimension" (comme demandé)
+    """
     if df.empty:
         df["score_fiche_technique"] = 0
         df["ano_fiche_technique"] = False
@@ -882,37 +922,33 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
         df["nb_fiche_champs_consideres"] = 0
         return df
 
+    # 1) colonnes analysées (sans dimensions)
+    fiche_cols = [c for c in fiche_cols if "dimension" not in c.lower()]
+
+    # 2) consensus + fréquences (rareté)
     stable_cols = []
-    consensus = {}
+    consensus = {}      # col -> (top_val, ratio)
+    freq_maps = {}      # col -> dict(value -> ratio)
+    support_map = {}    # col -> n (non-empty)
+
     for col in fiche_cols:
-        # ✅ DEMANDE CLIENT: ignorer le champ "dimensions" dans l'analyse
-        if "dimension" in col:
+        vals = [_norm_txt(x) for x in df[col].tolist()]
+        vals = [v for v in vals if v and v != "nan"]
+        n = len(vals)
+        support_map[col] = n
+        if n == 0:
             continue
 
-        top_val, ratio = _tech_field_consensus(df[col], min_ratio=consensus_ratio)
-        if top_val:
+        c = Counter(vals)
+        freq_maps[col] = {k: (v / n) for k, v in c.items()}
+
+        top_val, top_cnt = c.most_common(1)[0]
+        ratio = top_cnt / n
+        if ratio >= consensus_ratio:
             stable_cols.append(col)
             consensus[col] = (top_val, ratio)
 
-    # ✅ DEMANDE CLIENT: ignorer COMPLETEMENT dimensions
-    dim_cols = []
-
-    # ===================================================
-    # ✅ PATCH MINIMUM: détection "valeur rare" par champ fiche_*
-    # Objectif: remonter des valeurs très minoritaires (ex: "tube" 2 fois sur 40)
-    # ===================================================
-    rare_stats = {}
-    for col in fiche_cols:
-        if "dimension" in col:
-            continue
-        vals = [_norm_txt(x) for x in df[col].tolist()]
-        vals = [v for v in vals if v and v != "nan"]
-        if not vals:
-            continue
-        c = Counter(vals)
-        total = len(vals)
-        rare_stats[col] = (c, total)
-
+    # 3) scoring par produit
     issues_list = []
     scores = []
 
@@ -920,29 +956,25 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
         issues = []
         penalty = 0
 
-        # (1) mismatch vs consensus (existant)
-        for col in stable_cols:
+        for col in fiche_cols:
             v = _norm_txt(row.get(col, ""))
             if not v or v == "nan":
                 continue
-            top_val, _ = consensus[col]
-            if v != top_val:
-                penalty += 12
-                issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
 
-        # (2) ✅ valeur rare (nouveau)
-        # règle simple et robuste: flag si count <= 2 OU ratio <= 10% (sur valeurs non-vides)
-        for col, (c, total) in rare_stats.items():
-            v = _norm_txt(row.get(col, ""))
-            if not v or v == "nan":
-                continue
-            cnt = c.get(v, 0)
-            ratio = cnt / max(1, total)
+            # A) mismatch vs consensus
+            if col in consensus:
+                top_val, _ = consensus[col]
+                if v != top_val:
+                    penalty += 12
+                    issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
 
-            if (cnt <= 2) or (ratio <= 0.10):
-                # pénalité plus forte, car c'est précisément le cas "Tube" minoritaire
-                penalty += 20
-                issues.append(f"{col.replace('fiche_', '')}: valeur rare '{v}' ({cnt}/{total} = {round(ratio*100,1)}%)")
+            # B) rareté (même sans consensus)
+            n_support = support_map.get(col, 0)
+            if n_support >= min_support:
+                freq = freq_maps.get(col, {}).get(v, 0.0)
+                if freq > 0 and freq <= rare_ratio:
+                    penalty += 20
+                    issues.append(f"{col.replace('fiche_', '')}: valeur rare '{v}' (~{int(freq*100)}%)")
 
         score = int(min(100, penalty))
         scores.append(score)
@@ -951,7 +983,12 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
     df["score_fiche_technique"] = scores
     df["ano_fiche_technique"] = df["score_fiche_technique"] >= 25
     df["fiche_tech_issues"] = issues_list
-    df["nb_fiche_champs_consideres"] = len(stable_cols)
+
+    considered = 0
+    for col in fiche_cols:
+        if support_map.get(col, 0) >= min_support or col in stable_cols:
+            considered += 1
+    df["nb_fiche_champs_consideres"] = considered
 
     return df
 
@@ -1348,7 +1385,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         df["ano_description"] = False
         return df
 
-    # ✅ DEMANDE CLIENT: suppression du "texte global" => on ne calcule plus similarite_moyenne
     threshold_img = float(np.nanquantile(df["similarite_image_moyenne"], 0.05)) if "similarite_image_moyenne" in df.columns and df["similarite_image_moyenne"].notna().any() else None
     threshold_cat = float(np.nanquantile(df["similarite_categorie"], 0.10)) if "similarite_categorie" in df.columns and df["similarite_categorie"].notna().any() else None
 
@@ -1387,7 +1423,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 row_reasons.append("image très différente des autres produits de la catégorie")
                 row_actions.append("Vérifier si l’image correspond bien au produit et à la catégorie")
 
-        # ✅ DEMANDE CLIENT: vérif image(s) incluse(s) dans la description (balise cassée / hors sujet)
         desc_ok = str(row.get("desc_img_ok", "")).lower()
         desc_sims = str(row.get("desc_img_sim_to_main", ""))
 
@@ -1436,7 +1471,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             row_reasons.append("mentionne 'de salon' alors que la majorité des produits semble portable")
             row_actions.append("Vérifier si ce modèle ne devrait pas être dans une autre catégorie (produits de salon)")
 
-        # ---- ✅ NOUVEAU: fiche technique incohérente (comparaison valeurs) ----
         ft_score_raw = row.get("score_fiche_technique", 0)
         if isinstance(ft_score_raw, (int, float)) and not np.isnan(ft_score_raw) and ft_score_raw > 0:
             if ft_score_raw >= 40:
@@ -1451,7 +1485,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 row_reasons.append("fiche technique légèrement incohérente vs catégorie")
                 row_actions.append("Contrôler la fiche technique sur quelques champs")
 
-        # ---- description: couverture des mots-clés titres catégorie ----
         cov = row.get("desc_kw_coverage", np.nan)
         if isinstance(cov, (int, float)) and not np.isnan(cov) and cov < 0.20:
             score_desc += 15
@@ -1460,7 +1493,6 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
 
         score += score_ft + score_desc
 
-        # ---- prix comme indicateur de confirmation (pas déclencheur principal) ----
         prix = row.get("prix_num")
         if score >= 30 and q1 is not None and isinstance(prix, (int, float)) and not np.isnan(prix):
             if prix < q1 or prix > q3:
@@ -1522,7 +1554,6 @@ def add_client_decision_columns(df: pd.DataFrame, decisions_map: Optional[dict] 
     if "decision_client" not in df.columns:
         df["decision_client"] = ""
 
-    # réappliquer les décisions du client si elles existent déjà dans ALL_PRODUCTS
     if decisions_map:
         urls = df["url"].astype(str).tolist()
         df["decision_client"] = [
@@ -1592,7 +1623,6 @@ with st.sidebar:
 
 run = st.button("Lancer le scraping & l'analyse (toutes catégories)")
 
-# ✅ AJOUT: zones d'affichage "le code vit"
 heartbeat = st.empty()
 prod_status = st.empty()
 prod_prog = st.empty()
@@ -1638,12 +1668,11 @@ if run:
         prog = st.progress(0)
         status = st.empty()
 
-        last_heartbeat = 0.0  # ✅ AJOUT
+        last_heartbeat = 0.0
 
         for idx_cat, category_url in enumerate(category_urls, start=1):
             status.write(f"Catégorie {idx_cat}/{len(category_urls)} : {category_url}")
 
-            # ✅ AJOUT heartbeat (catégorie)
             now = time.time()
             if now - last_heartbeat > 1.0:
                 heartbeat.info(f"🔄 En cours… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
@@ -1659,11 +1688,9 @@ if run:
                 with st.spinner("Récupération URLs produits (pagination incluse)..."):
                     product_urls = get_product_urls(category_url, max_pages=int(max_pages))
 
-                # ✅ AJOUT: reset barre produit
                 prod_status.write("")
                 prod_prog.progress(0)
 
-                # exclusions persistantes
                 if sh is not None:
                     try:
                         excluded = load_excluded_urls(sh, category_url)
@@ -1679,7 +1706,6 @@ if run:
                     total_prod = len(product_urls)
 
                     for i, prod_url in enumerate(product_urls):
-                        # ✅ AJOUT heartbeat + progression produit
                         if i == 0 or (time.time() - last_heartbeat) > 1.0:
                             heartbeat.info(
                                 f"🧱 Scraping produits… {i+1}/{total_prod} – catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}"
@@ -1715,7 +1741,6 @@ if run:
 
                     df = pd.DataFrame(results)
 
-                    # mots-clés basés sur les TITRES produits de la catégorie
                     common_title_terms = compute_common_title_terms(df, top_k=12)
                     df["category_title_keywords"] = ", ".join(common_title_terms)
                     df["desc_kw_coverage"] = df["description"].fillna("").astype(str).apply(
@@ -1724,21 +1749,17 @@ if run:
 
                     df = enrich_structured_features(df, category_main_term)
 
-                    # ✅ compute_similarity sans texte global
                     df = compute_similarity(df, category_intro)
 
                     if analyse_image:
-                        # ✅ AJOUT heartbeat (images)
                         heartbeat.info(f"🖼️ Analyse images… catégorie {idx_cat}/{len(category_urls)} – {datetime.now().strftime('%H:%M:%S')}")
                         with st.spinner("Analyse images..."):
                             df = compute_image_similarity(df)
 
-                    # ✅ score incohérence fiche technique (comparaison valeurs), sans dimensions
                     df = compute_fiche_technique_incoherence(df, consensus_ratio=0.6)
 
                     df = add_outlier_flags_and_reasons(df, category_main_term)
 
-                    # colonnes client + réapplique décisions existantes
                     df = add_client_decision_columns(df, decisions_map=decisions_map)
 
                 st.session_state.results_by_category.append({
@@ -1765,16 +1786,12 @@ if run:
         status.success("Traitement terminé.")
         heartbeat.success(f"✅ Terminé – {datetime.now().strftime('%H:%M:%S')}")
 
-        # ===================================================
-        # EXPORT SHEETS
-        # ===================================================
         if export_sheets:
             if sheets_error:
                 st.error(f"Export Sheets impossible : {sheets_error}")
                 st.warning("Vérifie que le tableur est partagé avec l’email du service account.")
             else:
                 try:
-                    # ✅ AJOUT heartbeat (export)
                     heartbeat.info(f"📤 Export Google Sheets… {datetime.now().strftime('%H:%M:%S')}")
 
                     summary_rows = []
@@ -1790,17 +1807,14 @@ if run:
                         if df_all.empty:
                             df_all = pd.DataFrame({"info": [f"Aucun produit (ou tous exclus) pour: {cat_url}"]})
                         else:
-                            # enrich global ALL_PRODUCTS
                             df_all.insert(0, "category_url", cat_url)
                             df_all.insert(1, "category_title", item["category_title"])
                             df_all.insert(2, "mot_cle_principal", item["category_main_term"])
 
                             all_products_rows.append(df_all)
 
-                        # onglet catégorie
                         write_df_to_sheet(sh, tab_title, df_all)
 
-                        # suspects
                         if "suspect" in df_all.columns:
                             df_sus = df_all[df_all["suspect"] == True].copy()
                         else:
@@ -1809,7 +1823,6 @@ if run:
                         if not df_sus.empty:
                             all_suspects_rows.append(df_sus)
 
-                        # summary
                         n_total = int(len(df_all)) if "url" in df_all.columns else 0
                         n_sus = int(df_all["suspect"].sum()) if "suspect" in df_all.columns else 0
                         n_excl = int(df_all["exclure_prochaine_analyse"].sum()) if "exclure_prochaine_analyse" in df_all.columns else 0
@@ -1824,7 +1837,6 @@ if run:
                             "date_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         })
 
-                        # mise à jour exclusions
                         update_exclusions_from_df(sh, cat_url, item["df"])
 
                     df_summary = pd.DataFrame(summary_rows)
@@ -1836,11 +1848,9 @@ if run:
                     else:
                         write_df_to_sheet(sh, "SUSPECTS", pd.DataFrame({"info": ["Aucun suspect"]}))
 
-                    # ✅ ALL_PRODUCTS (tout le monde, au cas où)
                     if all_products_rows:
                         df_all_products = pd.concat(all_products_rows, ignore_index=True)
 
-                        # colonnes “nécessaires” en priorité
                         preferred = [
                             "category_url", "category_title", "mot_cle_principal",
                             "nom", "marque", "prix", "prix_num",
@@ -1870,10 +1880,6 @@ if run:
                     st.error(f"Export Sheets impossible : {e}")
                     st.warning("Vérifie que le tableur est partagé avec l’email du service account.")
 
-
-# ===================================================
-# AFFICHAGE RESULTATS
-# ===================================================
 
 if st.session_state.results_by_category:
     st.subheader("📦 Résultats par catégorie")
