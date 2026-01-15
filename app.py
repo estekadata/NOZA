@@ -411,17 +411,9 @@ def build_category_main_term(category_title: str, category_url: str) -> str:
     return tokens[0] if tokens else "produit"
 
 
-# ===================================================
-# ✅ PATCH MINIMAL ICI (get_product_urls)
-# ===================================================
-
 def get_product_urls(category_url: str, max_pages: int = 80) -> list:
-    """
-    PATCH:
-    - Ne filtre plus les URLs produit avec (slug in href) => évite de rater des produits listés.
-    - Utilise des sélecteurs produits (Magento) en priorité.
-    - Fallback sur tous les liens .html si aucun sélecteur ne retourne de résultat.
-    """
+    slug = get_category_slug(category_url)
+
     urls = set()
     visited_pages = set()
     current = category_url
@@ -433,28 +425,13 @@ def get_product_urls(category_url: str, max_pages: int = 80) -> list:
 
         soup = get_soup(current)
 
-        # 1) Sélecteurs produits (priorité)
-        selectors = [
-            "a.product-item-link[href]",
-            "h2.product-name a[href]",
-            ".product-name a[href]",
-            "a.product-image[href]",
-        ]
-        page_urls = set()
-        for sel in selectors:
-            for a in soup.select(sel):
-                href = a.get("href", "")
-                if href and href.endswith(".html"):
-                    page_urls.add(absolutize_url(href))
-
-        # 2) Fallback: tout .html (sans filtrer par slug)
-        if not page_urls:
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if href and href.endswith(".html"):
-                    page_urls.add(absolutize_url(href))
-
-        urls.update(page_urls)
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if not href.endswith(".html"):
+                continue
+            if slug and slug not in href:
+                continue
+            urls.add(absolutize_url(href))
 
         next_url = find_next_page_url(soup, current)
         if not next_url:
@@ -918,6 +895,24 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
             consensus[col] = (top_val, ratio)
 
     # ✅ DEMANDE CLIENT: ignorer COMPLETEMENT dimensions
+    dim_cols = []
+
+    # ===================================================
+    # ✅ PATCH MINIMUM: détection "valeur rare" par champ fiche_*
+    # Objectif: remonter des valeurs très minoritaires (ex: "tube" 2 fois sur 40)
+    # ===================================================
+    rare_stats = {}
+    for col in fiche_cols:
+        if "dimension" in col:
+            continue
+        vals = [_norm_txt(x) for x in df[col].tolist()]
+        vals = [v for v in vals if v and v != "nan"]
+        if not vals:
+            continue
+        c = Counter(vals)
+        total = len(vals)
+        rare_stats[col] = (c, total)
+
     issues_list = []
     scores = []
 
@@ -925,6 +920,7 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
         issues = []
         penalty = 0
 
+        # (1) mismatch vs consensus (existant)
         for col in stable_cols:
             v = _norm_txt(row.get(col, ""))
             if not v or v == "nan":
@@ -933,6 +929,20 @@ def compute_fiche_technique_incoherence(df: pd.DataFrame, consensus_ratio: float
             if v != top_val:
                 penalty += 12
                 issues.append(f"{col.replace('fiche_', '')}: '{v}' ≠ '{top_val}'")
+
+        # (2) ✅ valeur rare (nouveau)
+        # règle simple et robuste: flag si count <= 2 OU ratio <= 10% (sur valeurs non-vides)
+        for col, (c, total) in rare_stats.items():
+            v = _norm_txt(row.get(col, ""))
+            if not v or v == "nan":
+                continue
+            cnt = c.get(v, 0)
+            ratio = cnt / max(1, total)
+
+            if (cnt <= 2) or (ratio <= 0.10):
+                # pénalité plus forte, car c'est précisément le cas "Tube" minoritaire
+                penalty += 20
+                issues.append(f"{col.replace('fiche_', '')}: valeur rare '{v}' ({cnt}/{total} = {round(ratio*100,1)}%)")
 
         score = int(min(100, penalty))
         scores.append(score)
