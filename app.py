@@ -1922,4 +1922,4 @@ st.markdown("""
 <div style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 1rem;">
     S-Factory Product Analyzer • Powered by Python & Streamlit
 </div>
-""", unsafe_allow_html=True)git 
+""", unsafe_allow_html=True)
