@@ -16,6 +16,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
+soup = BeautifulSoup(html, "html.parser")
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -1921,4 +1922,4 @@ st.markdown("""
 <div style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 1rem;">
     S-Factory Product Analyzer • Powered by Python & Streamlit
 </div>
-""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)git 
