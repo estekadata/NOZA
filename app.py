@@ -1387,15 +1387,15 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         # Fiche technique
         ft_score_raw = row.get("score_fiche_technique", 0)
         if isinstance(ft_score_raw, (int, float)) and not np.isnan(ft_score_raw) and ft_score_raw > 0:
-            if ft_score_raw >= 40:
-                score_ft += 25
+            if ft_score_raw >= 30:
+                score_ft += 30
                 row_reasons.append("fiche technique incohérente")
                 det = row.get("fiche_tech_issues", "")
                 if det:
                     row_reasons.append(f"→ {det}")
                 row_actions.append("Vérifier fiche technique")
-            elif ft_score_raw >= 25:
-                score_ft += 12
+            elif ft_score_raw >= 20:
+                score_ft += 20
                 row_reasons.append("fiche technique légèrement incohérente")
                 row_actions.append("Contrôler fiche technique")
         
