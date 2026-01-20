@@ -325,6 +325,12 @@ st.markdown("""
     ::-webkit-scrollbar-thumb:hover {
         background: var(--primary);
     }
+    section[data-testid="stSidebar"] * {
+    color: white !important;
+    }
+    section[data-testid="stSidebar"] label {
+        color: white !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
