@@ -1363,6 +1363,11 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
         except Exception:
             pass
         
+        title_qty = row.get("title_qty", "")
+        if title_qty and isinstance(title_qty, (int, float)) and title_qty >= 10:
+            score += 30
+            row_reasons.append(f"produit vendu en lot/display ({int(title_qty)} unites)")
+            row_actions.append("Verifier si ce lot doit etre dans une categorie 'grossiste' ou 'display'")
         # Flags produit
         if row.get("has_capsule_word", False):
             score += 25
