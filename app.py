@@ -16,7 +16,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
-soup = BeautifulSoup(html, "html.parser")
+
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -510,7 +510,7 @@ def get_soup_cached(url: str) -> str:
 
 def get_soup(url: str) -> BeautifulSoup:
     html = get_soup_cached(url)
-    return BeautifulSoup(html, "lxml")  # lxml est plus rapide que html.parser
+    return BeautifulSoup(html, "html.parser") # lxml est plus rapide que html.parser
 
 # ===================================================
 # PAGINATION
