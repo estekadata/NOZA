@@ -610,39 +610,56 @@ def get_product_urls(category_url: str, max_pages: int = 80) -> list:
     urls = set()
     visited_pages = set()
     current = category_url
-    
+
+    # Chemin de catégorie pour filtrer les produits hors catégorie
+    cat_path = urlparse(category_url).path.rstrip("/") + "/"
+
     for _ in range(max_pages):
         if current in visited_pages:
             break
         visited_pages.add(current)
-        
+
         soup = get_soup(current)
+
         selectors = [
             "a.product-item-link[href]",
             "h2.product-name a[href]",
             ".product-name a[href]",
             "a.product-image[href]",
         ]
+
         page_urls = set()
+
+        def accept_href(href: str) -> bool:
+            if not href:
+                return False
+            absu = absolutize_url(href)
+            p = urlparse(absu).path
+            # on garde uniquement les .html qui sont dans l'arborescence de la catégorie
+            return p.endswith(".html") and (p.startswith(cat_path) or cat_path in p)
+
         for sel in selectors:
             for a in soup.select(sel):
                 href = a.get("href", "")
-                if href and href.endswith(".html"):
+                if accept_href(href):
                     page_urls.add(absolutize_url(href))
-        
+
+        # Fallback MAIS filtré (sinon tu repêches n'importe quoi)
         if not page_urls:
             for a in soup.find_all("a", href=True):
                 href = a["href"]
-                if href and href.endswith(".html"):
+                if accept_href(href):
                     page_urls.add(absolutize_url(href))
-        
+
         urls.update(page_urls)
+
         next_url = find_next_page_url(soup, current)
         if not next_url:
             break
         current = next_url
-    
+
     return sorted(urls)
+
 
 # ===================================================
 # SCRAPING PRODUIT
