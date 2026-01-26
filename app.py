@@ -1358,7 +1358,7 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             if isinstance(simc, (int, float)) and not np.isnan(simc) and simc < threshold_cat:
                 score += 20
                 row_reasons.append("texte produit peu aligné avec l'introduction de la catégorie")
-                row_actions.append("Vérifier classement catégorie")
+                # row_actions.append("Vérifier classement catégorie") - désactivé
         
         # Similarité image
         if threshold_img is not None:
@@ -1391,21 +1391,8 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
             score += 30
             row_reasons.append(f"produit vendu en lot/display ({int(title_qty)} unites)")
             row_actions.append("Verifier si ce lot doit etre dans une categorie 'grossiste' ou 'display'")
-        # Flags produit
-        if row.get("has_capsule_word", False):
-            score += 25
-            row_reasons.append("semble être une capsule")
-            row_actions.append("Déplacer en 'capsules' ou 'accessoires'")
-        
-        if row.get("has_accessoire_word", False):
-            score += 25
-            row_reasons.append("termes d'accessoire détectés")
-            row_actions.append("Déplacer en 'accessoires'")
-        
-        if not row.get("has_category_word", True):
-            score += 15
-            row_reasons.append(f"mot-clé '{term}' absent du titre/description")
-            row_actions.append("Enrichir contenu ou vérifier classement")
+        # Flags produit - désactivés pour éviter les faux positifs
+        # (capsule, accessoire, category_word)
         
         if majority_portable and row.get("is_salon", False):
             score += 15
@@ -1427,12 +1414,12 @@ def add_outlier_flags_and_reasons(df: pd.DataFrame, category_main_term: str) -> 
                 row_reasons.append("fiche technique légèrement incohérente")
                 row_actions.append("Contrôler fiche technique")
         
-        # Description keywords
-        cov = row.get("desc_kw_coverage", np.nan)
-        if isinstance(cov, (int, float)) and not np.isnan(cov) and cov < 0.20:
-            score_desc += 15
-            row_reasons.append("description peu alignée avec les mots courants")
-            row_actions.append("Enrichir description")
+        # Description keywords - désactivé pour éviter faux positifs
+        # cov = row.get("desc_kw_coverage", np.nan)
+        # if isinstance(cov, (int, float)) and not np.isnan(cov) and cov < 0.20:
+        #     score_desc += 15
+        #     row_reasons.append("description peu alignée avec les mots courants")
+        #     row_actions.append("Enrichir description")
         
         score += score_ft + score_desc
         
