@@ -2,7 +2,11 @@ streamlit
 scikit-learn
 beautifulsoup4
 numpy
+pandas
 Pillow
 imagehash
 gspread
 google-auth
+pyyaml
+plotly
+pytest
